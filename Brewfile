@@ -29,6 +29,7 @@ brew "git-delta"
 brew "gobject-introspection"
 brew "gping"
 brew "libfido2"
+brew 'mas' # Mac App Store manager
 brew "mysql-client"
 brew "neofetch"
 brew "node"
@@ -88,3 +89,11 @@ cask "visual-studio-code"
 cask "webstorm"
 cask "wireshark"
 cask "zoom"
+
+# MAS
+mas "1Password for Safari", id: 1569813296
+mas "Color Picker", id: 1545870783
+mas "Developer", id: 640199958
+mas "Gifski", id: 1351639930
+mas "Pure Paste", id: 1611378436
+mas "Wipr", id: 1320666476
