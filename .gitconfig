@@ -1,0 +1,56 @@
+[user]
+	email = tommy@barvaag.com
+	name = Tommy Barvåg
+[alias]
+    iw = !git init && git config user.email "tommy.barvag@knowit.no"
+    co = checkout
+    cob = checkout -b
+    coo = !git fetch && git checkout
+    br = branch
+    brd = branch -d
+    brD = branch -D
+    merged = branch --merged
+    dmerged = "!git branch --merged | grep -Ev '(\\*|master|develop|staging|next)' | xargs -n 1 git branch -d"
+    dhmerged = "!git branch --merged | grep -v '\\*' | xargs -n 1 git branch -d"
+    st = status
+    aa = add -A .
+    cm = !git add -A && git commit -m
+    aacm = !git add -A . && git commit -m
+    cp = cherry-pick
+    amend = commit --amend -m
+    ls = log --pretty=format:"%C(yellow)%h%Cred%d\\ %Creset%s%Cblue\\ [%cn]" --decorate
+    ll = log --pretty=format:"%C(yellow)%h%Cred%d\\ %Creset%s%Cblue\\ [%cn]" --decorate --numstat
+    ld = log --pretty=format:"%C(yellow)%h\\ %ad%Cred%d\\ %Creset%s%Cblue\\ [%cn]" --decorate --date=relative
+    lds = log --pretty=format:"%C(yellow)%h\\ %ad%Cred%d\\ %Creset%s%Cblue\\ [%cn]" --decorate --date=short
+    f = "!git ls-files | grep -i"
+    gr = grep -Ii
+    la = "!git config -l | grep alias | cut -c 7-"
+    lg1 = log --graph --abbrev-commit --decorate --format=format:'%C(bold blue)%h%C(reset) - %C(bold green)(%ar)%C(reset) %C(white)%s%C(reset) %C(dim white)- %an%C(reset)%C(bold yellow)%d%C(reset)' --all
+    lg2 = log --graph --abbrev-commit --decorate --format=format:'%C(bold blue)%h%C(reset) - %C(bold cyan)%aD%C(reset) %C(bold green)(%ar)%C(reset)%C(bold yellow)%d%C(reset)%n''          %C(white)%s%C(reset) %C(dim white)- %an%C(reset)' --all
+    lg = !"git lg1"
+    sl = stash list
+    sa = stash apply
+    ss = stash save
+    r = reset
+    r1 = reset HEAD^
+    r2 = reset HEAD^^
+    rh = reset --hard
+    rh1 = reset HEAD^ --hard
+    rh2 = reset HEAD^^ --hard
+
+[core]
+    pager = delta
+
+[interactive]
+    diffFilter = delta --color-only
+
+[delta]
+    features = side-by-side line-numbers decorations
+    whitespace-error-style = 22 reverse
+
+[delta "decorations"]
+    commit-decoration-style = bold yellow box ul
+    file-style = bold yellow ul
+    file-decoration-style = none
+[init]
+	defaultBranch = main

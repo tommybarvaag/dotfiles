@@ -1,0 +1,57 @@
+# Shortcuts
+alias copyssh="pbcopy < $HOME/.ssh/id_ed25519.pub"
+alias reloadshell="source $HOME/.zshrc"
+alias reloaddns="dscacheutil -flushcache && sudo killall -HUP mDNSResponder"
+alias ll="/opt/homebrew/opt/coreutils/libexec/gnubin/ls -AhlFo --color --group-directories-first"
+alias shrug="echo '¯\_(ツ)_/¯' | pbcopy"
+alias c="clear"
+alias compile="commit 'compile'"
+alias version="commit 'version'"
+
+# Directories
+alias dotfiles="cd $DOTFILES"
+alias library="cd $HOME/Library"
+alias src="cd $HOME/_src"
+
+
+# JS
+alias nfresh="rm -rf node_modules/ package-lock.json && npm install"
+alias watch="npm run watch"
+
+# Git
+alias gst="git status"
+alias gb="git branch"
+alias gc="git checkout"
+alias gl="git log --oneline --decorate --color"
+alias amend="git add . && git commit --amend --no-edit"
+alias commit="git add . && git commit -m"
+alias diff="git diff"
+alias force="git push --force"
+alias nuke="git clean -df && git reset --hard"
+alias pop="git stash pop"
+alias pull="git pull"
+alias push="git push"
+alias resolve="git add . && git commit --no-edit"
+alias stash="git stash -u"
+alias unstage="git restore --staged ."
+alias wip="commit wip"
+
+# ZSH
+alias zshconfig="code $HOME/.zshrc"
+alias zshreload="source $HOME/.zshrc"
+alias ohmyzsh="code $HOME/.oh-my-zsh"
+alias p10k="code $HOME/.p10k.zsh"
+alias diskusage="du -sh * | sort -h"
+alias cat="bat"
+alias ls="exa -l --sort=type"
+alias l="exa -l --sort=type"
+alias ll="exa --long --tree"
+alias grep="rg"
+alias rgweb="rg --type-add 'web:*.{html,css,js}'"
+alias pi="pnpm install"
+alias pup="pnpm update --interactive --latest"
+alias pugl="pnpm --interactive --latest --loglevel=silent"
+alias pbuild="pnpm build"
+alias pstart="pnpm start"
+alias ptest="pnpm test"
+alias pdev="pnpm dev"
