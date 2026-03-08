@@ -1,20 +1,51 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-echo "Generating a new SSH key for GitHub..."
+set -euo pipefail
 
-# Generating a new SSH key
-# https://docs.github.com/en/github/authenticating-to-github/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent#generating-a-new-ssh-key
-ssh-keygen -t ed25519 -C $1 -f ~/.ssh/id_ed25519
+if [[ $# -ne 1 ]]; then
+  printf 'usage: %s <email>\n' "$(basename "$0")" >&2
+  exit 1
+fi
 
-# Adding your SSH key to the ssh-agent
-# https://docs.github.com/en/github/authenticating-to-github/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent#adding-your-ssh-key-to-the-ssh-agent
-eval "$(ssh-agent -s)"
+email="$1"
+key_path="$HOME/.ssh/id_ed25519"
+config_file="$HOME/.ssh/config"
 
-touch ~/.ssh/config
-echo "Host *\n AddKeysToAgent yes\n UseKeychain yes\n IdentityFile ~/.ssh/id_ed25519" | tee ~/.ssh/config
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 
-ssh-add -K ~/.ssh/id_ed25519
+if [[ ! -f "$key_path" ]]; then
+  echo "Generating a new SSH key for GitHub..."
+  ssh-keygen -t ed25519 -C "$email" -f "$key_path"
+else
+  echo "SSH key already exists at $key_path"
+fi
 
-# Adding your SSH key to your GitHub account
-# https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account
-echo "run 'pbcopy < ~/.ssh/id_ed25519.pub' and paste that into GitHub"
+eval "$(ssh-agent -s)" >/dev/null
+ssh-add --apple-use-keychain "$key_path"
+
+touch "$config_file"
+chmod 600 "$config_file"
+
+if ! grep -q '^Host github\.com$' "$config_file"; then
+  cat >>"$config_file" <<'EOF'
+
+Host github.com
+  AddKeysToAgent yes
+  UseKeychain yes
+  IdentityFile ~/.ssh/id_ed25519
+EOF
+  echo "Added GitHub host block to $config_file"
+else
+  echo "GitHub host block already present in $config_file"
+fi
+
+if command -v pbcopy >/dev/null 2>&1; then
+  pbcopy < "${key_path}.pub"
+  echo "Public key copied to clipboard."
+else
+  echo "Run: cat ${key_path}.pub"
+fi
+
+echo "Add the public key to GitHub:"
+echo "https://github.com/settings/keys"
