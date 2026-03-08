@@ -2,7 +2,7 @@
     email = tommy@barvaag.com
     name = Tommy Barvåg
 [alias]
-    iw = !git init && git config user.email "dev_tommy.lunde.barvag@elmera.no"
+    iw = !git init && git config user.email \"${WORK_GIT_EMAIL:-$(git config user.email)}\"
     co = checkout
     cob = checkout -b
     coo = !git fetch && git checkout

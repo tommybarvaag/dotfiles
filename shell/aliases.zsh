@@ -30,7 +30,7 @@ alias gl="git log --oneline --decorate --color"
 alias amend="git add . && git commit --amend --no-edit"
 alias commit="git add . && git commit -m"
 alias gd="git diff"
-alias force="git push --force"
+alias force="git push --force-with-lease"
 alias nuke="git clean -df && git reset --hard"
 alias pop="git stash pop"
 alias pull="git pull"
@@ -72,3 +72,4 @@ alias gfb="git fuzzy branch"
 alias gfd="git fuzzy diff"
 alias brewup="brew update && brew upgrade && brew cleanup"
 alias path='print -l ${(s/:/)PATH}'
+alias kkk='nvim $(fzf --preview="bat --color=always --style=numbers --line-range=:200 {}")'

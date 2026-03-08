@@ -154,7 +154,19 @@ PY
 install_brew_bundle() {
   log_step "Installing Homebrew bundle"
   brew update
-  brew bundle --file "$DOTFILES/Brewfile"
+  if ! brew bundle --file "$DOTFILES/Brewfile"; then
+    echo "Warning: some Homebrew packages failed to install."
+    echo "Run 'brew bundle --file ~/.dotfiles/Brewfile' to retry."
+  fi
+
+  if [[ -f "$DOTFILES/Brewfile.mas" ]]; then
+    log_step "Installing Mac App Store apps"
+    if ! brew bundle --file "$DOTFILES/Brewfile.mas"; then
+      echo "Warning: some Mac App Store apps failed to install."
+      echo "Ensure you are signed into the App Store, then run:"
+      echo "  brew bundle --file ~/.dotfiles/Brewfile.mas"
+    fi
+  fi
 }
 
 install_node_lts() {
