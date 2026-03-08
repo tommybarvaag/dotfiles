@@ -1,3 +1,5 @@
+unalias md 2>/dev/null
+
 md() {
   if [[ $# -ne 1 ]]; then
     print "usage: md <directory>"
