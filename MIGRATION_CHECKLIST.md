@@ -4,7 +4,7 @@
 - List non-Homebrew apps with `ls /Applications/ | sort`
 - Confirm VS Code Settings Sync is enabled
 - Export Raycast settings
-- Back up `~/.config/dotfiles/local.env`
+- Back up `~/.config/dotfiles/.env`
 - Back up `~/.gitconfig.local`
 - Back up SSH keys, or confirm 1Password SSH agent is ready
 - Check `~/Library/Fonts/` for custom fonts
@@ -26,7 +26,7 @@
 6. Clone `git@github.com:tommybarvaag/dotfiles.git` to `~/.dotfiles`.
 7. Run `~/.dotfiles/install.sh`.
 8. Restart the terminal.
-9. Restore `~/.config/dotfiles/local.env`.
+9. Restore `~/.config/dotfiles/.env`.
 10. Restore `~/.gitconfig.local`.
 11. Run `~/.dotfiles/vscode.sh` if any tracked VS Code extensions are missing.
 12. Import Raycast settings.

@@ -1,5 +1,6 @@
 .claude/
 .DS_Store
+.env
 .env.local
 Brewfile.lock.json
 tools/

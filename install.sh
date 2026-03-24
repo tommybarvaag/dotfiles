@@ -6,7 +6,7 @@ DOTFILES="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AUTO="${DOTFILES_AUTO:-0}"
 RUN_MACOS="${DOTFILES_RUN_MACOS:-0}"
 LOCAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles"
-LOCAL_ENV_FILE="$LOCAL_CONFIG_DIR/local.env"
+LOCAL_ENV_FILE="$LOCAL_CONFIG_DIR/.env"
 TIMESTAMP="$(date +%Y%m%d%H%M%S)"
 
 log_step() {
@@ -116,7 +116,7 @@ ensure_local_env() {
   chmod 700 "$LOCAL_CONFIG_DIR"
 
   if [[ ! -f "$LOCAL_ENV_FILE" ]]; then
-    cp "$DOTFILES/shell/local.env.example" "$LOCAL_ENV_FILE"
+    cp "$DOTFILES/shell/.env.example" "$LOCAL_ENV_FILE"
   fi
 
   chmod 600 "$LOCAL_ENV_FILE"
