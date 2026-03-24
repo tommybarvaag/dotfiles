@@ -1,4 +1,46 @@
 unalias md 2>/dev/null
+unalias copyssh 2>/dev/null
+
+copyssh() {
+  local key_path=""
+  local candidate=""
+
+  if command -v ssh >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      candidate="${candidate/#\~/$HOME}"
+      candidate="${candidate/#%d/$HOME}"
+
+      if [[ -f "${candidate}.pub" ]]; then
+        key_path="$candidate"
+        break
+      fi
+    done <<EOF
+$(ssh -G github.com 2>/dev/null | awk '/^identityfile / { print $2 }')
+EOF
+  fi
+
+  if [[ -z "$key_path" ]]; then
+    for candidate in "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ed25519"; do
+      if [[ -f "${candidate}.pub" ]]; then
+        key_path="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$key_path" ]]; then
+    print "No GitHub SSH public key found."
+    return 1
+  fi
+
+  if command -v pbcopy >/dev/null 2>&1; then
+    pbcopy < "${key_path}.pub"
+    printf 'Copied %s.pub to clipboard.\n' "$key_path"
+    return
+  fi
+
+  command cat "${key_path}.pub"
+}
 
 md() {
   if [[ $# -ne 1 ]]; then

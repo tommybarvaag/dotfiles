@@ -159,14 +159,14 @@ install_brew_bundle() {
     echo "Run 'brew bundle --file ~/.dotfiles/Brewfile' to retry."
   fi
 
-  if [[ -f "$DOTFILES/Brewfile.mas" ]]; then
-    log_step "Installing Mac App Store apps"
-    if ! brew bundle --file "$DOTFILES/Brewfile.mas"; then
-      echo "Warning: some Mac App Store apps failed to install."
-      echo "Ensure you are signed into the App Store, then run:"
-      echo "  brew bundle --file ~/.dotfiles/Brewfile.mas"
-    fi
-  fi
+  # if [[ -f "$DOTFILES/Brewfile.mas" ]]; then
+  #   log_step "Installing Mac App Store apps"
+  #   if ! brew bundle --file "$DOTFILES/Brewfile.mas"; then
+  #     echo "Warning: some Mac App Store apps failed to install."
+  #     echo "Ensure you are signed into the App Store, then run:"
+  #     echo "  brew bundle --file ~/.dotfiles/Brewfile.mas"
+  #   fi
+  # fi
 }
 
 install_node_lts() {
@@ -234,6 +234,7 @@ main() {
   link_file "$DOTFILES/shell/.p10k.zsh" "$HOME/.p10k.zsh"
   link_file "$DOTFILES/git/.gitconfig" "$HOME/.gitconfig"
   link_file "$DOTFILES/git/.gitignore_global" "$HOME/.gitignore_global"
+  link_file "$DOTFILES/.agents" "$HOME/.agents"
   link_file "$DOTFILES/config/ghostty/config" "$HOME/.config/ghostty/config"
 
   install_brew_bundle

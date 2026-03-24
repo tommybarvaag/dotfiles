@@ -21,7 +21,7 @@
 1. Sign in to Apple ID.
 2. Update macOS.
 3. Run `xcode-select --install`.
-4. Run `curl -fsSL https://raw.githubusercontent.com/tommybarvaag/dotfiles/main/ssh.sh | bash -s "<email>"`.
+4. Run `curl -fsSL https://raw.githubusercontent.com/tommybarvaag/dotfiles/main/ssh.sh | bash -s "<email>"` for the default RSA key, or append `--eddsa` if you specifically want Ed25519.
 5. Add the public key to GitHub.
 6. Clone `git@github.com:tommybarvaag/dotfiles.git` to `~/.dotfiles`.
 7. Run `~/.dotfiles/install.sh`.

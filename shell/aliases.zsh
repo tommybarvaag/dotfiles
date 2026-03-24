@@ -1,5 +1,4 @@
 # Shortcuts
-alias copyssh='pbcopy < "$HOME/.ssh/id_ed25519.pub"'
 alias reloadshell='source "$HOME/.zshrc"'
 alias reloaddns="dscacheutil -flushcache && sudo killall -HUP mDNSResponder"
 alias shrug="echo '¯\_(ツ)_/¯' | pbcopy"
@@ -47,7 +46,7 @@ alias ohmyzsh="code $HOME/.oh-my-zsh"
 alias p10k="code $HOME/.p10k.zsh"
 alias diskusage="du -sh * | sort -h"
 alias cat="bat"
-alias ls="eza --icons --hyperlink --group-directories-first"
+alias ls="eza --icons --hyperlink -l --group-directories-first"
 alias l="eza --icons --hyperlink -l --group-directories-first"
 alias ll="eza --icons --hyperlink -l --tree --level=2 --group-directories-first"
 alias la="eza --icons --hyperlink -la --group-directories-first"
