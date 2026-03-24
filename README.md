@@ -1,30 +1,46 @@
-## Introduction
+## Dotfiles
 
-This repository serves as my way to help me setup and maintain my Mac. It takes the effort out of installing everything manually. Everything needed to install my preferred setup of macOS is detailed in this readme. Feel free to explore, learn and copy parts for your own dotfiles.
+Simple Mac setup: clone the repo, run the installer, and keep secrets local.
 
-### Setting up your Mac
+### Use
 
-After backing up your old Mac you may now follow these install instructions to setup a new one.
+1. If needed, create an SSH key:
 
-1. Update macOS to the latest version through system preferences
-2. [Generate a new public and private SSH key](https://docs.github.com/en/github/authenticating-to-github/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent) by running:
-
-```zsh
-    curl https://raw.githubusercontent.com/tommybarvaag/dotfiles/HEAD/ssh.sh | sh -s "<your-email-address>"
+```bash
+curl -fsSL https://raw.githubusercontent.com/tommybarvaag/dotfiles/main/ssh.sh | bash -s "<your-email>"
 ```
 
-3. Clone this repo to `~/.dotfiles` with:
+Append `--eddsa` if you specifically want an Ed25519 key instead of the default RSA key.
 
-```zsh
-    git clone --recursive git@github.com:tommybarvaag/dotfiles.git ~/.dotfiles
+2. Clone the repo:
+
+```bash
+git clone git@github.com:tommybarvaag/dotfiles.git ~/.dotfiles
 ```
 
-4. Run the installation with:
+3. Run the installer:
 
-```zsh
-~/.dotfiles/fresh.sh
+```bash
+~/.dotfiles/install.sh
 ```
 
-5. Restart your computer to finalize the process
+This also manages `~/.agents` by symlinking it to `~/.dotfiles/.agents`.
 
-Your Mac is now ready to use!
+4. Restart the terminal.
+5. Restore `~/.config/dotfiles/.env` and `~/.gitconfig.local` if you use them.
+6. If VS Code extensions are missing, run `~/.dotfiles/vscode.sh`.
+
+### Non-interactive
+
+```bash
+DOTFILES_AUTO=1 ~/.dotfiles/install.sh
+```
+
+Use `DOTFILES_RUN_MACOS=1` as well if you want macOS defaults applied in auto mode.
+
+### Notes
+
+- Secrets and machine-specific paths live in `~/.config/dotfiles/.env`
+- Use `shell/.env.example` as the template
+- Machine-specific Git overrides live in `~/.gitconfig.local`
+- This repo manages zsh, git, Homebrew, Ghostty, global agent skills via `~/.agents`, and macOS defaults

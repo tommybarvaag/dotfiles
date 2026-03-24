@@ -1,8 +1,8 @@
 [user]
-	email = tommy@barvaag.com
-	name = Tommy Barvåg
+    email = tommy@barvaag.com
+    name = Tommy Barvåg
 [alias]
-    iw = !git init && git config user.email "tommy.barvag@knowit.no"
+    iw = !git init && git config user.email \"${WORK_GIT_EMAIL:-$(git config user.email)}\"
     co = checkout
     cob = checkout -b
     coo = !git fetch && git checkout
@@ -10,7 +10,7 @@
     brd = branch -d
     brD = branch -D
     merged = branch --merged
-    dmerged = "!git branch --merged | grep -Ev '(\\*|master|develop|staging|next)' | xargs -n 1 git branch -d"
+    dmerged = "!git branch --merged | grep -Ev '(\\*|main|master|develop|staging|next)' | xargs -n 1 git branch -d"
     dhmerged = "!git branch --merged | grep -v '\\*' | xargs -n 1 git branch -d"
     st = status
     aa = add -A .
@@ -40,6 +40,7 @@
 
 [core]
     pager = delta
+    excludesfile = ~/.gitignore_global
 
 [interactive]
     diffFilter = delta --color-only
@@ -47,10 +48,59 @@
 [delta]
     features = side-by-side line-numbers decorations
     whitespace-error-style = 22 reverse
+    side-by-side = true
+    line-numbers = true
+    hyperlinks = true
 
 [delta "decorations"]
     commit-decoration-style = bold yellow box ul
     file-style = bold yellow ul
     file-decoration-style = none
+
+[diff]
+    algorithm = histogram
+    colorMoved = plain
+    renames = copies
+
+[help]
+    autocorrect = immediate
+
+[fetch]
+    prune = true
+
+[commit]
+    verbose = true
+
+[protocol]
+    version = 2
+
 [init]
-	defaultBranch = main
+    defaultBranch = main
+
+[push]
+    autoSetupRemote = true
+
+[rerere]
+    enabled = true
+    autoupdate = true
+
+[stash]
+    showPatch = true
+
+[log]
+    date = human
+
+[merge]
+    conflictstyle = diff3
+
+[checkout]
+    defaultRemote = origin
+
+[advice]
+    detachedHead = false
+
+[url "git@github.com:"]
+    insteadOf = https://github.com/
+
+[include]
+    path = ~/.gitconfig.local

@@ -1,0 +1,6 @@
+keybind = ctrl+z=close_surface
+keybind = ctrl+d=new_split:right
+
+font-family = Geist Mono
+theme = Ayu Light
+keybind = shift+enter=text:\x1b\r

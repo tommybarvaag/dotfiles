@@ -1,0 +1,6 @@
+# Copy to ~/.gitconfig.local for machine-specific overrides.
+
+[user]
+    email = your-work-email@company.com
+    name = Your Name
+    signingkey = ~/.ssh/id_ed25519.pub
