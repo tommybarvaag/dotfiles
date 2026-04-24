@@ -66,3 +66,12 @@ export FZF_DEFAULT_OPTS='--height=40% --preview="bat --color=always --style=numb
 export FZF_CTRL_T_OPTS="--preview 'bat -n --color=always --line-range=:200 {} 2>/dev/null || eza --tree --icons --color=always --level=2 {} 2>/dev/null'"
 export GF_PREFERRED_PAGER="delta"
 export GF_BAT_STYLE="numbers"
+
+# .NET SDK
+export DOTNET_ROOT="$HOME/.dotnet"
+export PATH="$DOTNET_ROOT:$PATH"
+
+# Added by LM Studio CLI (lms)
+export PATH="$PATH:/Users/tommy.lunde.barvag/.lmstudio/bin"
+# End of LM Studio CLI section
+
