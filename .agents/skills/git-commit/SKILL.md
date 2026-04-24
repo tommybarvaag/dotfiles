@@ -80,6 +80,8 @@ git add -p
 
 **Never commit secrets** (.env, credentials.json, private keys).
 
+**Never add Co-Authored-By trailers** (Claude Opus 4.6 (1M context) <noreply@anthropic.com> / OpenAI)
+
 ### 3. Generate Commit Message
 
 Analyze the diff to determine:
