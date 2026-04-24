@@ -236,6 +236,7 @@ main() {
   link_file "$DOTFILES/git/.gitignore_global" "$HOME/.gitignore_global"
   link_file "$DOTFILES/.agents" "$HOME/.agents"
   link_file "$DOTFILES/config/ghostty/config" "$HOME/.config/ghostty/config"
+  link_file "$DOTFILES/config/nvim" "$HOME/.config/nvim"
 
   install_brew_bundle
   install_vscode_extensions
