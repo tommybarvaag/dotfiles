@@ -190,6 +190,22 @@ ensure_git_fuzzy() {
   git clone https://github.com/bigH/git-fuzzy.git "$DOTFILES/tools/git-fuzzy"
 }
 
+install_local_tools() {
+  local tool_dir="$DOTFILES/tools/reclaim-disk"
+  local bin_dir="$HOME/.local/bin"
+
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "Skipping local tools: bun is not installed."
+    return
+  fi
+
+  log_step "Installing local tools"
+  (cd "$tool_dir" && bun install --frozen-lockfile)
+
+  mkdir -p "$bin_dir"
+  link_file "$tool_dir/src/main.ts" "$bin_dir/reclaim-disk"
+}
+
 install_vscode_extensions() {
   if [[ ! -x "$DOTFILES/vscode.sh" ]]; then
     return
@@ -242,6 +258,7 @@ main() {
   install_vscode_extensions
   install_node_lts
   ensure_git_fuzzy
+  install_local_tools
   configure_local_settings
   ensure_hushlogin
 

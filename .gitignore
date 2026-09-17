@@ -3,4 +3,4 @@
 .env
 .env.local
 Brewfile.lock.json
-tools/
+tools/git-fuzzy/
