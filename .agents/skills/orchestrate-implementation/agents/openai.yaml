@@ -1,0 +1,5 @@
+interface:
+  display_name: "Orchestrate Implementation"
+  short_description: "Orchestrate a spec or ticket graph into a single PR"
+policy:
+  allow_implicit_invocation: false

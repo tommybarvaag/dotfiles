@@ -15,3 +15,5 @@ Thumbs.db
 
 # Tool-specific local config
 .git-fuzzy-config
+
+**/.claude/settings.local.json

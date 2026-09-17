@@ -75,3 +75,21 @@ export PATH="$DOTNET_ROOT:$PATH"
 export PATH="$PATH:/Users/tommy.lunde.barvag/.lmstudio/bin"
 # End of LM Studio CLI section
 
+
+# nub
+export PATH="$HOME/.nub/bin:$PATH"
+
+# >>> grok installer >>>
+export PATH="$HOME/.grok/bin:$PATH"
+fpath=(~/.grok/completions/zsh $fpath)
+autoload -Uz compinit && compinit -C
+# <<< grok installer <<<
+
+# opencode
+export PATH=/Users/tommy.lunde.barvag/.opencode/bin:$PATH
+
+# bun completions
+[ -s "/Users/tommy.lunde.barvag/.bun/_bun" ] && source "/Users/tommy.lunde.barvag/.bun/_bun"
+
+# Added by Devin
+export PATH="/Users/tommy.lunde.barvag/.codeium/windsurf/bin:$PATH"
