@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+  // Naming any plugin replaces the default set, so the three plugins oxlint
+  // enables on its own are repeated here alongside the two that are added.
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error",
+    "pedantic": "error"
+  },
+
+  "rules": {
+    // The coding standards forbid these outright.
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/consistent-type-imports": "error",
+
+    // `_tag` is the discriminant the standards mandate for tagged unions and errors.
+    "eslint/no-underscore-dangle": "off",
+
+    // A module owns its whole error family; one class per file would scatter a
+    // cohesive domain for no gain.
+    "eslint/max-classes-per-file": "off",
+
+    // The standards reject arbitrary size limits in favour of cohesion.
+    "eslint/max-lines": "off",
+    "eslint/max-lines-per-function": "off",
+    "import/max-dependencies": "off",
+
+    // `Number.parseInt(text, 10)` behind an explicit `/^\d+$/u` check states the
+    // intent - read a decimal integer - better than `Math.trunc(Number(text))`.
+    "unicorn/prefer-number-coercion": "off"
+  }
+}

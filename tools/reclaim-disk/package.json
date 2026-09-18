@@ -9,6 +9,8 @@
   },
   "scripts": {
     "start": "bun run src/main.ts",
+    "format": "prettier --write .",
+    "lint": "oxlint",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
@@ -18,6 +20,8 @@
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
+    "oxlint": "1.83.0",
+    "prettier": "3.9.7",
     "typescript": "5.9.2"
   }
 }

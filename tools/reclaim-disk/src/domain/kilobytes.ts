@@ -48,7 +48,7 @@ export function parse(value: number): Effect.Effect<Kilobytes, InvalidKilobytes>
 export function parseField(text: string): Effect.Effect<Kilobytes, InvalidKilobytes> {
   const trimmed = text.trim();
 
-  if (!/^\d+$/.test(trimmed)) {
+  if (!/^\d+$/u.test(trimmed)) {
     return Effect.fail(new InvalidKilobytes({ received: text }));
   }
 

@@ -7,7 +7,7 @@
  * continuously enough that repainting on each one supplies all the motion
  * needed, and nothing is left to clean up if the process dies abruptly.
  */
-import { Console, Effect, Layer, Ref, Stdio, Terminal } from "effect";
+import { Effect, Layer, Ref, Stdio, Terminal } from "effect";
 import { ScanProgress } from "../ports.ts";
 
 /** Erase the current line and return the cursor to its start. */
@@ -106,22 +106,6 @@ export const ScanProgressSilent = Layer.succeed(
   ScanProgress,
   ScanProgress.of({
     scanning: () => Effect.void,
-    found: () => Effect.void,
-    measured: () => Effect.void,
-    done: Effect.void,
-  }),
-);
-
-/**
- * Progress that prints one line per phase without cursor control.
- *
- * Useful when watching a run whose output is being captured, where repainting
- * would be invisible but silence is unhelpful.
- */
-export const ScanProgressPlain = Layer.succeed(
-  ScanProgress,
-  ScanProgress.of({
-    scanning: (lookingFor, root) => Console.log(`scanning ${lookingFor} in ${root}`),
     found: () => Effect.void,
     measured: () => Effect.void,
     done: Effect.void,

@@ -8,19 +8,18 @@
  * and the compiler enforces it.
  */
 import { Context, type Effect } from "effect";
+import type { Cutoff } from "./domain/cutoff.ts";
 import type { Kilobytes } from "./domain/kilobytes.ts";
-import type { WorktreeState } from "./domain/worktree.ts";
+import type { Inspection } from "./domain/worktree.ts";
 import type {
   ArchiveFailed,
+  NotAWorktree,
   PruneFailed,
   RemoveFailed,
   ScanFailed,
   SizeUnavailable,
   WorktreeStatusUnavailable,
 } from "./errors.ts";
-
-/** A cutoff expressed as whole days before now. */
-export type AgeInDays = number;
 
 /**
  * Where the inventory reports what it is doing while it does it.
@@ -66,6 +65,29 @@ export class ScanProgress extends Context.Service<
   }
 >()("reclaim-disk/ScanProgress") {}
 
+/**
+ * A directory the walk could not list, so nothing beneath it was examined.
+ *
+ * An unprivileged sweep of a home directory always hits some, so one of these
+ * is not a reason to end a scan. It is a reason to say so: the tool's claim is
+ * that nothing vanishes silently, and a directory that was skipped is carried
+ * back alongside the matches rather than dropped.
+ */
+export type UnreadableDirectory = {
+  /** The directory that could not be listed. */
+  readonly path: string;
+  /** Why it could not be listed, in the failure's own words. */
+  readonly reason: string;
+};
+
+/** What one search of the tree established. */
+export type SearchResult = {
+  /** Absolute paths of the directories the search was looking for. */
+  readonly matches: ReadonlyArray<string>;
+  /** Directories the search could not descend into, reported rather than skipped in silence. */
+  readonly skipped: ReadonlyArray<UnreadableDirectory>;
+};
+
 /** Read-only observation of the machine. */
 export class DiskInventory extends Context.Service<
   DiskInventory,
@@ -73,29 +95,26 @@ export class DiskInventory extends Context.Service<
     /**
      * Find every `.turbo/cache` directory beneath a root.
      *
+     * A root that does not exist holds no caches, which is a fact about the
+     * machine rather than a broken request - both roots are defaulted, so a
+     * machine where one was never created must still get the other's report.
+     *
      * @param root - The directory to search.
-     * @returns Absolute paths to each cache directory.
+     * @returns Each cache directory, and every directory the search could not read.
      */
-    readonly findTurboCaches: (root: string) => Effect.Effect<ReadonlyArray<string>, ScanFailed>;
+    readonly findTurboCaches: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
 
     /**
      * Find every agent worktree beneath a root.
      *
      * Worktrees are nested one level under a per-repository grouping, so this
-     * looks exactly two levels deep.
+     * looks exactly two levels deep. A root that does not exist holds no
+     * worktrees, for the same reason it holds no caches.
      *
      * @param root - The worktree root directory.
-     * @returns Absolute paths to each worktree.
+     * @returns Each worktree, and every directory the search could not read.
      */
-    readonly findWorktrees: (root: string) => Effect.Effect<ReadonlyArray<string>, ScanFailed>;
-
-    /**
-     * Find every git repository beneath a root.
-     *
-     * @param root - The directory to search.
-     * @returns Absolute paths to each repository working directory.
-     */
-    readonly findRepositories: (root: string) => Effect.Effect<ReadonlyArray<string>, ScanFailed>;
+    readonly findWorktrees: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
 
     /**
      * Measure a directory's total size.
@@ -109,23 +128,29 @@ export class DiskInventory extends Context.Service<
      * Measure only the immediate children of a directory last modified before a cutoff.
      *
      * @param path - The directory whose entries are measured.
-     * @param olderThan - The age cutoff in days.
+     * @param staleBefore - The resolved cutoff the plan carries.
      * @returns The combined size of the stale entries.
      */
     readonly sizeOfStaleEntries: (
       path: string,
-      olderThan: AgeInDays,
+      staleBefore: Cutoff,
     ) => Effect.Effect<Kilobytes, SizeUnavailable>;
 
     /**
-     * Read what a worktree's git status proves about it.
+     * Establish that a directory is a linked worktree, which repository owns
+     * it, and what its git status proves about it.
      *
-     * @param path - The worktree directory.
-     * @returns The classified state.
+     * All three facts come from the directory itself, so the repository a
+     * removal must be pruned in is known without searching for one — and a
+     * directory that merely sits where a worktree would be is refused rather
+     * than described, because an `Inspection` is a claim the caller acts on.
+     *
+     * @param path - The directory to examine.
+     * @returns The owning repository and the classified state.
      */
-    readonly worktreeState: (
+    readonly inspectWorktree: (
       path: string,
-    ) => Effect.Effect<WorktreeState, WorktreeStatusUnavailable>;
+    ) => Effect.Effect<Inspection, WorktreeStatusUnavailable | NotAWorktree>;
 
     /**
      * Read the free space on the volume holding the user's data.
@@ -144,7 +169,9 @@ export class DiskMutator extends Context.Service<
      * Archive a worktree's untracked files before it is removed.
      *
      * Must fail rather than produce an empty or partial archive, because the
-     * caller deletes the worktree on success.
+     * caller deletes the worktree on success. A clean exit code is not enough
+     * to establish that: the implementation has to read the archive back and
+     * find every one of these paths in it.
      *
      * @param worktree - The worktree holding the files.
      * @param files - The untracked paths, relative to the worktree.
@@ -158,6 +185,10 @@ export class DiskMutator extends Context.Service<
     /**
      * Remove a directory and everything beneath it.
      *
+     * Removal is depth-first and not atomic: a `RemoveFailed` means the path is
+     * still there, not that it is untouched, because everything already
+     * unlinked beneath it stays unlinked. Callers must report it as such.
+     *
      * @param path - The directory to remove.
      */
     readonly remove: (path: string) => Effect.Effect<void, RemoveFailed>;
@@ -165,12 +196,15 @@ export class DiskMutator extends Context.Service<
     /**
      * Remove the immediate children of a directory last modified before a cutoff.
      *
+     * Takes the same resolved cutoff the size was measured against, so the set
+     * that was reported is the set that is removed.
+     *
      * @param path - The directory whose entries are pruned.
-     * @param olderThan - The age cutoff in days.
+     * @param staleBefore - The resolved cutoff the plan carries.
      */
     readonly removeStaleEntries: (
       path: string,
-      olderThan: AgeInDays,
+      staleBefore: Cutoff,
     ) => Effect.Effect<void, RemoveFailed>;
 
     /**
