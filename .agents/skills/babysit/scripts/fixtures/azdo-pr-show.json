@@ -1,0 +1,83 @@
+{
+  "artifactId": "vstfs:///Git/PullRequestId/proj-guid%2frepo-guid%2f77",
+  "autoCompleteSetBy": null,
+  "closedBy": null,
+  "closedDate": null,
+  "codeReviewId": 77,
+  "completionOptions": null,
+  "createdBy": {
+    "id": "op-guid",
+    "displayName": "Octo Operator",
+    "uniqueName": "operator@acme.test",
+    "isContainer": null,
+    "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/op-guid",
+    "imageUrl": null,
+    "descriptor": null
+  },
+  "creationDate": "2026-10-08T08:00:00Z",
+  "description": "Adds a widget cache",
+  "isDraft": false,
+  "labels": [],
+  "lastMergeCommit": {
+    "commitId": "3333333333333333333333333333333333333333"
+  },
+  "lastMergeSourceCommit": {
+    "commitId": "1111111111111111111111111111111111111111",
+    "author": null
+  },
+  "lastMergeTargetCommit": {
+    "commitId": "4444444444444444444444444444444444444444"
+  },
+  "mergeFailureMessage": null,
+  "mergeFailureType": null,
+  "mergeId": "merge-guid",
+  "mergeOptions": null,
+  "mergeStatus": "succeeded",
+  "pullRequestId": 77,
+  "remoteUrl": null,
+  "repository": {
+    "id": "repo-guid",
+    "name": "widgets",
+    "project": {
+      "id": "proj-guid",
+      "name": "Acme Platform",
+      "state": "wellFormed",
+      "visibility": "private"
+    }
+  },
+  "reviewers": [
+    {
+      "id": "ada-guid",
+      "displayName": "Ada Reviewer",
+      "uniqueName": "ada@acme.test",
+      "isContainer": null,
+      "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/ada-guid",
+      "imageUrl": null,
+      "descriptor": null,
+      "vote": -5,
+      "isRequired": true,
+      "hasDeclined": false,
+      "isFlagged": false
+    },
+    {
+      "id": "team-guid",
+      "displayName": "[Acme Platform]\\Widgets Team",
+      "uniqueName": "vstfs:///Classification/TeamProject/proj-guid\\Widgets Team",
+      "isContainer": true,
+      "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/team-guid",
+      "imageUrl": null,
+      "descriptor": null,
+      "vote": 0,
+      "isRequired": null,
+      "hasDeclined": false,
+      "isFlagged": false
+    }
+  ],
+  "sourceRefName": "refs/heads/feat/widget-cache",
+  "status": "active",
+  "supportsIterations": true,
+  "targetRefName": "refs/heads/main",
+  "title": "Add widget cache",
+  "url": "https://dev.azure.com/acme/proj-guid/_apis/git/repositories/repo-guid/pullRequests/77",
+  "workItemRefs": []
+}
