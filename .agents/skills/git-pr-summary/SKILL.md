@@ -7,6 +7,17 @@ description: Create a concise pull request summary in markdown format based on t
 
 Create a concise pull request summary in markdown format based on the provided git diff context.
 
+## Repository template
+
+Look for the repository's pull request template before drafting: `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`, a file under `.github/PULL_REQUEST_TEMPLATE/`, or `pull_request_template.md` at the root or in `docs/`. When one exists, it is the output format:
+
+- Keep its headings, in order, and fill every section from the diff and the verification that was run.
+- Replace each HTML comment with the content it asks for.
+- Read the contributing guide the template or `AGENTS.md` points to, and meet what it asks of a PR, such as before and after screenshots or a list of the checks run and what could not be checked.
+- Write no heading of your own above the template's sections. GitHub can use the body's first line as the squash-merge title, so the PR title stays the conventional commit title.
+
+The guidelines below still shape the wording. The default format under Output applies only when the repository has no template.
+
 ## Guidelines
 
 - Follow instructions carefully.
@@ -23,7 +34,7 @@ Create a concise pull request summary in markdown format based on the provided g
 2. Summarize the nature of the changes (e.g., new feature, bug fix, refactoring).
 3. Brainstorm the motivation behind these changes.
 4. Assess the impact on the overall project.
-5. Do not use tools to explore code, beyond what is available in the git context.
+5. Do not use tools to explore code, beyond what is available in the git context. The PR template and the contributing guide count as git context.
 6. Check for any sensitive information that shouldn't be committed.
 7. Draft the pull request summary.
 8. Draft a concise (1-5 bullet points) pull request summary that focuses on the "why" rather than the "what"
@@ -36,6 +47,8 @@ Create a concise pull request summary in markdown format based on the provided g
 
 ## Output
 
+This default format applies only when the repository has no PR template.
+
 - Use Title Case for the summary title, keep the title short and descriptive
 - No nested lists
 - Keep the markdown simple
@@ -45,7 +58,7 @@ Create a concise pull request summary in markdown format based on the provided g
 
 ## Steps
 
-1. Run `git diff main --diff-algorithm=minimal` to review the changes
+1. Find the repository template (see Repository template) and run `git diff main --diff-algorithm=minimal` to review the changes
 2. Analyze the changes and determine the appropriate conventional commit type:
 3. Draft the pull request summary based on the analysis steps above
 4. Review the draft summary to ensure it accurately reflects the changes and their purpose
