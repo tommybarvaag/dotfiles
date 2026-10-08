@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { parsePrArgument, parsePrNumber, parsePrUrl, parseRemoteUrl, redactUrl, stateKey, type PrTarget } from "./pr-target.ts";
+import { describe, it } from "@effect/vitest";
+import { Redacted, Result, Schema } from "effect";
+import {
+  parsePrArgument,
+  parsePrNumber,
+  parsePrUrl,
+  parseRemoteUrl,
+  redactUrl,
+  stateKey,
+  type Forge,
+  type PrTarget,
+} from "./pr-target.ts";
+
+const remote = (url: string) => Redacted.make(url);
+const repoOf = (url: string, force: Forge | null = null) => Result.getOrThrow(parseRemoteUrl(remote(url), force));
+
+/** Owner and repository names as both forges allow them in URLs, mixed case included. */
+const Slug = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/));
+const Secret = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9]{8,24}$/));
+const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThan(1_000_000));
 
 describe("parsePrUrl", () => {
   it("reads GitHub PR URLs, including sub-pages", () => {
@@ -34,6 +52,17 @@ describe("parsePrUrl", () => {
     assert.equal(parsePrUrl("https://github.com/acme/widgets/issues/42"), null);
     assert.equal(parsePrUrl("https://gitlab.com/acme/widgets/-/merge_requests/1"), null);
   });
+
+  it.prop(
+    "reads back the owner, repository and number of any GitHub PR URL",
+    { owner: Slug, name: Slug, number: PositiveInt },
+    ({ owner, name, number }) => {
+      assert.deepEqual(parsePrUrl(`https://github.com/${owner}/${name}/pull/${number}`), {
+        repo: { _tag: "github", owner, name: name.endsWith(".git") ? name.slice(0, -4) : name },
+        number,
+      });
+    },
+  );
 });
 
 describe("parseRemoteUrl", () => {
@@ -46,42 +75,55 @@ describe("parseRemoteUrl", () => {
     ["https://acme.visualstudio.com/Platform/_git/widgets", "azdo", "acme/Platform/widgets"],
     ["acme@vs-ssh.visualstudio.com:v3/acme/Platform/widgets", "azdo", "acme/Platform/widgets"],
   ];
-  for (const [remote, forge, path] of cases) {
-    it(`detects ${forge} from ${remote}`, () => {
-      const repo = parseRemoteUrl(remote, null);
-      assert.equal(repo._tag, "ok");
-      if (repo._tag !== "ok") return;
-      assert.equal(repo.value._tag, forge);
-      const actual =
-        repo.value._tag === "github"
-          ? `${repo.value.owner}/${repo.value.name}`
-          : `${repo.value.organization}/${repo.value.project}/${repo.value.name}`;
+  for (const [url, forge, path] of cases) {
+    it(`detects ${forge} from ${url}`, () => {
+      const repo = repoOf(url);
+      assert.equal(repo._tag, forge);
+      const actual = repo._tag === "github" ? `${repo.owner}/${repo.name}` : `${repo.organization}/${repo.project}/${repo.name}`;
       assert.equal(actual, path);
     });
   }
 
   it("needs --forge github for an SSH host alias", () => {
-    assert.equal(parseRemoteUrl("git@github-work:acme/widgets.git", null)._tag, "err");
-    const forced = parseRemoteUrl("git@github-work:acme/widgets.git", "github");
-    assert.deepEqual(forced, { _tag: "ok", value: { _tag: "github", owner: "acme", name: "widgets" } });
+    assert.ok(Result.isFailure(parseRemoteUrl(remote("git@github-work:acme/widgets.git"), null)));
+    assert.deepEqual(repoOf("git@github-work:acme/widgets.git", "github"), { _tag: "github", owner: "acme", name: "widgets" });
   });
 
   it("refuses a forge override that contradicts an Azure DevOps remote", () => {
-    assert.equal(parseRemoteUrl("https://dev.azure.com/acme/Platform/_git/widgets", "github")._tag, "err");
+    assert.ok(Result.isFailure(parseRemoteUrl(remote("https://dev.azure.com/acme/Platform/_git/widgets"), "github")));
   });
+
+  it.prop(
+    "reads the same GitHub repository from every remote form",
+    { owner: Slug, name: Slug.check(Schema.isPattern(/[^.]$/)) },
+    ({ owner, name }) => {
+      for (const url of [
+        `https://github.com/${owner}/${name}.git`,
+        `git@github.com:${owner}/${name}.git`,
+        `ssh://git@github.com/${owner}/${name}`,
+      ]) {
+        assert.deepEqual(repoOf(url), { _tag: "github", owner, name });
+      }
+    },
+  );
 });
 
 describe("parsePrArgument", () => {
   it("accepts auto, numbers and URLs", () => {
-    assert.deepEqual(parsePrArgument("auto"), { _tag: "ok", value: { _tag: "auto" } });
-    assert.deepEqual(parsePrArgument("12"), { _tag: "ok", value: { _tag: "number", number: 12 } });
+    assert.deepEqual(parsePrArgument("auto"), Result.succeed({ _tag: "auto" }));
+    assert.deepEqual(parsePrArgument("12"), Result.succeed({ _tag: "number", number: 12 }));
     const url = parsePrArgument("https://github.com/acme/widgets/pull/3");
-    assert.equal(url._tag === "ok" ? url.value._tag : null, "url");
+    assert.equal(Result.isSuccess(url) ? url.success._tag : null, "url");
   });
 
   it("rejects zero, negatives and junk", () => {
-    for (const input of ["0", "-3", "1.5", "pr-12", ""]) assert.equal(parsePrArgument(input)._tag, "err", input);
+    for (const input of ["0", "-3", "1.5", "pr-12", ""]) assert.ok(Result.isFailure(parsePrArgument(input)), input);
     assert.equal(parsePrNumber(0), null);
+  });
+
+  it.prop("accepts every positive integer and nothing that is not one", { n: Schema.Finite }, ({ n }) => {
+    const parsed = parsePrNumber(n);
+    assert.equal(parsed, Number.isSafeInteger(n) && n > 0 ? n : null);
   });
 });
 
@@ -114,6 +156,16 @@ describe("stateKey", () => {
       stateKey(target("https://dev.azure.com/acme/platform/_git/widgets/pullrequest/7")),
     );
   });
+
+  it.prop(
+    "is filesystem-safe and ignores letter case for any pull request",
+    { owner: Slug, name: Slug, number: PositiveInt },
+    ({ owner, name, number }) => {
+      const key = stateKey(target(`https://github.com/${owner}/${name}/pull/${number}`));
+      assert.match(key, /^[a-z0-9._-]+$/);
+      assert.equal(key, stateKey(target(`https://github.com/${owner.toUpperCase()}/${name.toUpperCase()}/pull/${number}`)));
+    },
+  );
 });
 
 describe("credential redaction", () => {
@@ -133,17 +185,30 @@ describe("credential redaction", () => {
   });
 
   it("never echoes a credential-bearing remote in an UnrecognizedRemote error", () => {
-    const remote = "https://bob:PAT_SECRET_123@dev.azure.com/acme/Platform/_git/widgets";
-    const rejected = parseRemoteUrl(remote, "github");
-    assert.equal(rejected._tag, "err");
-    if (rejected._tag !== "err") return;
-    assert.doesNotMatch(rejected.error.message, /PAT_SECRET_123|bob/);
-    assert.doesNotMatch(rejected.error.remote, /PAT_SECRET_123/);
+    const rejected = parseRemoteUrl(remote("https://bob:PAT_SECRET_123@dev.azure.com/acme/Platform/_git/widgets"), "github");
+    assert.ok(Result.isFailure(rejected));
+    assert.doesNotMatch(rejected.failure.message, /PAT_SECRET_123|bob/);
+    assert.doesNotMatch(rejected.failure.remote, /PAT_SECRET_123/);
   });
 
   it("never echoes credentials from a rejected --pr value", () => {
     const rejected = parsePrArgument("https://bob:PAT_SECRET_123@gitlab.com/acme/widgets/-/merge_requests/1");
-    assert.equal(rejected._tag, "err");
-    assert.doesNotMatch(rejected._tag === "err" ? rejected.error.message : "", /PAT_SECRET_123/);
+    assert.ok(Result.isFailure(rejected));
+    assert.doesNotMatch(rejected.failure.message, /PAT_SECRET_123/);
   });
+
+  it("keeps a remote redacted when it is printed or serialized", () => {
+    const secret = remote("https://bob:PAT_SECRET_123@dev.azure.com/acme/Platform/_git/widgets");
+    assert.doesNotMatch(`${String(secret)} ${JSON.stringify({ secret })}`, /PAT_SECRET_123/);
+  });
+
+  it.prop(
+    "never leaks a token from an unrecognized HTTPS remote",
+    { user: Slug, token: Secret, host: Slug },
+    ({ user, token, host }) => {
+      const rejected = parseRemoteUrl(remote(`https://${user}:${token}@${host}.example/acme/widgets`), "azdo");
+      assert.ok(Result.isFailure(rejected));
+      assert.ok(!rejected.failure.message.includes(token) && !rejected.failure.remote.includes(token));
+    },
+  );
 });

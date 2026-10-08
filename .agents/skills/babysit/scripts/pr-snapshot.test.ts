@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "@effect/vitest";
+import { Result } from "effect";
+import { observation as anyObservation, policyIdentities } from "./pr-snapshot.arbitrary.ts";
 import {
+  Action,
   decide,
   isTerminal,
+  isTrusted,
   threadWriteEligibility,
   type Check,
   type Observation,
@@ -12,6 +16,7 @@ import {
   type WatchPolicy,
 } from "./pr-snapshot.ts";
 import * as WatchState from "./watch-state.ts";
+import { watchState } from "./watch-state.arbitrary.ts";
 
 const policy: WatchPolicy = { reviewBots: ["chatgpt-codex-connector"], requester: "me", retryBudget: 2, replyMarker: "[babysit]" };
 const NOW = "2026-10-08T12:00:00.000Z";
@@ -264,9 +269,77 @@ describe("threadWriteEligibility", () => {
 describe("WatchState.parse", () => {
   it("round-trips a saved state and rejects foreign JSON", () => {
     const state = WatchState.reserveRetry(WatchState.markSeen(WatchState.initial, ["a"]), "sha");
-    assert.deepEqual(WatchState.parse(JSON.parse(JSON.stringify(state))), { _tag: "ok", value: state });
-    assert.equal(WatchState.parse({ version: 1, retry: null })._tag, "err", "a pre-v2 single-SHA retry state");
-    assert.equal(WatchState.parse({ version: 3 })._tag, "err");
-    assert.equal(WatchState.parse([])._tag, "err");
+    assert.deepEqual(WatchState.parse(JSON.parse(JSON.stringify(state))), Result.succeed(state));
+    assert.ok(Result.isFailure(WatchState.parse({ version: 1, retry: null })), "a pre-v2 single-SHA retry state");
+    assert.ok(Result.isFailure(WatchState.parse({ version: 3 })));
+    assert.ok(Result.isFailure(WatchState.parse([])));
+  });
+
+  it("reads missing or null lists of an older v2 file as empty", () => {
+    assert.deepEqual(WatchState.parse({ version: 2, seenItemIds: null }), Result.succeed(WatchState.initial));
+  });
+
+  it.prop("round-trips every reachable state through its JSON file", { state: watchState }, ({ state }) => {
+    assert.deepEqual(WatchState.parse(JSON.parse(JSON.stringify(state, null, 2))), Result.succeed(state));
+  });
+});
+
+describe("decide invariants", () => {
+  const generatedPolicy: WatchPolicy = { ...policy, ...policyIdentities, reviewBots: [...policyIdentities.reviewBots] };
+  const order = Action.literals;
+  const cases = { observation: anyObservation, state: watchState };
+
+  it.prop("a strict stop is the only action and changes nothing", cases, ({ observation, state }) => {
+    const decision = decide(observation, state, generatedPolicy, NOW);
+    const stopped = observation.pr.state !== "open" || observation.mergeability.status === "conflicting";
+    assert.equal(isTerminal(decision.snapshot), stopped);
+    if (!stopped) return;
+    assert.equal(decision.snapshot.actions.length, 1);
+    assert.equal(decision.state, state);
+    assert.deepEqual(decision.retryTargets, []);
+  });
+
+  it.prop("actions are never empty, never repeat, idle stands alone, and follow priority order", cases, ({ observation, state }) => {
+    const { actions } = decide(observation, state, generatedPolicy, NOW).snapshot;
+    assert.ok(actions.length > 0);
+    assert.equal(new Set(actions).size, actions.length);
+    if (actions.includes("idle")) assert.deepEqual(actions, ["idle"]);
+    const ranks = actions.map((action) => order.indexOf(action));
+    assert.deepEqual(ranks, [...ranks].sort((left, right) => left - right));
+  });
+
+  it.prop("a retry plan exists exactly when a retry is offered, and only within budget", cases, ({ observation, state }) => {
+    const decision = decide(observation, state, generatedPolicy, NOW);
+    assert.equal(decision.retryTargets.length > 0, decision.snapshot.actions.includes("retry_failed_checks"));
+    if (decision.retryTargets.length > 0) {
+      assert.ok(WatchState.retriesUsed(state, observation.pr.headSha) < generatedPolicy.retryBudget);
+    }
+  });
+
+  it.prop("never celebrates or reaches the milestone from an incomplete observation", cases, ({ observation, state }) => {
+    const { actions, completeness } = decide(observation, state, generatedPolicy, NOW).snapshot;
+    if (completeness._tag === "incomplete") {
+      assert.ok(!actions.includes("celebrate_ci_green") && !actions.includes("ready_to_merge"));
+    }
+  });
+
+  it.prop("only surfaces trusted, unresolved items it has not surfaced before", cases, ({ observation, state }) => {
+    const { newItems } = decide(observation, state, generatedPolicy, NOW).snapshot.review;
+    for (const item of newItems) {
+      assert.ok(isTrusted(item.author, generatedPolicy), item.id);
+      assert.ok(item.thread === null || !item.thread.resolved, item.id);
+      assert.ok(!WatchState.hasSeen(state, item.id), item.id);
+    }
+  });
+
+  it.prop("remembers everything it surfaced, so deciding again surfaces nothing new", cases, ({ observation, state }) => {
+    const first = decide(observation, state, generatedPolicy, NOW);
+    for (const id of state.seenItemIds) assert.ok(WatchState.hasSeen(first.state, id), "nothing seen is forgotten");
+    for (const sha of state.celebratedShas) assert.ok(WatchState.wasCelebrated(first.state, sha));
+    // A strict stop deliberately remembers nothing (see above).
+    if (isTerminal(first.snapshot)) return;
+    const again = decide(observation, first.state, generatedPolicy, NOW).snapshot;
+    assert.deepEqual(again.review.newItems, []);
+    assert.ok(!again.actions.includes("celebrate_ci_green"));
   });
 });

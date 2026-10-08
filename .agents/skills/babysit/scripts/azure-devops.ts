@@ -1,24 +1,13 @@
 /**
  * Azure DevOps adapter: `az repos pr show`, `az repos pr policy list`, PR threads and build
- * timelines through `az devops invoke`.
- * Parsed into the forge-neutral {@link Observation}. Reruns requeue policy evaluations.
+ * timelines through `az devops invoke`, parsed with Effect Schema into the forge-neutral
+ * {@link Observation}. Reruns requeue policy evaluations.
  */
-import type { CommandRunner } from "./command-runner.ts";
-import {
-  array,
-  boolean,
-  decodeJson,
-  literal,
-  nullable,
-  number,
-  object,
-  ShapeMismatch,
-  string,
-  withDefault,
-  type Decoded,
-  type Decoder,
-} from "./decode.ts";
-import { NoOpenPullRequest, ThreadNotFound, type ForgeClient, type ForgeError } from "./forge-client.ts";
+import { Effect, Layer, Schema } from "effect";
+import { CommandRunner } from "./command-runner.ts";
+import { casesHandled } from "./defects.ts";
+import { decodeJson, nullable, ShapeMismatch, withDefault } from "./decode.ts";
+import { ForgeClient, NoOpenPullRequest, ThreadNotFound, type ForgeError } from "./forge-client.ts";
 import type {
   Check,
   CheckStatus,
@@ -33,7 +22,6 @@ import type {
   ReviewThread,
 } from "./pr-snapshot.ts";
 import { parsePrNumber, type AzureRepo, type PrNumber, type PrTarget } from "./pr-target.ts";
-import { casesHandled, err, ok, type Result } from "./result.ts";
 
 const REVIEWER_POLICIES: ReadonlyArray<string> = ["Minimum number of reviewers", "Required reviewers"];
 /**
@@ -48,106 +36,104 @@ const COMPLETION_POLICIES: ReadonlyArray<string> = ["Require a merge strategy"];
  */
 const HUMAN_SUBJECT_TYPES: ReadonlyArray<string> = ["aad", "msa"];
 
-const identity = object({
-  id: string,
-  displayName: withDefault(string, ""),
-  uniqueName: nullable(string),
-  descriptor: nullable(string),
+const Identity = Schema.Struct({
+  id: Schema.String,
+  displayName: withDefault(Schema.String, ""),
+  uniqueName: nullable(Schema.String),
+  descriptor: nullable(Schema.String),
 });
 
-const pullRequest = object({
-  pullRequestId: number,
-  title: withDefault(string, ""),
-  status: literal(["active", "abandoned", "completed"]),
-  isDraft: withDefault(boolean, false),
-  mergeStatus: nullable(literal(["notSet", "queued", "conflicts", "succeeded", "rejectedByPolicy", "failure"])),
-  mergeFailureMessage: nullable(string),
-  sourceRefName: string,
-  targetRefName: string,
-  lastMergeSourceCommit: nullable(object({ commitId: string })),
-  reviewers: withDefault(array(object({ vote: literal([10, 5, 0, -5, -10]) })), []),
-  repository: object({ id: string, name: string, project: object({ id: string, name: string }) }),
+const PullRequestRecord = Schema.Struct({
+  pullRequestId: Schema.Finite,
+  title: withDefault(Schema.String, ""),
+  status: Schema.Literals(["active", "abandoned", "completed"]),
+  isDraft: withDefault(Schema.Boolean, false),
+  mergeStatus: nullable(Schema.Literals(["notSet", "queued", "conflicts", "succeeded", "rejectedByPolicy", "failure"])),
+  mergeFailureMessage: nullable(Schema.String),
+  sourceRefName: Schema.String,
+  targetRefName: Schema.String,
+  lastMergeSourceCommit: nullable(Schema.Struct({ commitId: Schema.String })),
+  reviewers: withDefault(Schema.Array(Schema.Struct({ vote: Schema.Literals([10, 5, 0, -5, -10]) })), []),
+  repository: Schema.Struct({
+    id: Schema.String,
+    name: Schema.String,
+    project: Schema.Struct({ id: Schema.String, name: Schema.String }),
+  }),
 });
 
-const policyStatus = literal(["queued", "running", "approved", "rejected", "notApplicable", "broken"]);
-const policyEvaluations = array(
-  object({
-    evaluationId: string,
-    status: policyStatus,
-    configuration: object({
-      isBlocking: boolean,
-      isEnabled: boolean,
-      type: object({ displayName: string }),
-      settings: nullable(
-        object({
-          displayName: nullable(string),
-          statusName: nullable(string),
-          statusGenre: nullable(string),
-          manualQueueOnly: withDefault(boolean, false),
-        }),
-      ),
-    }),
-    context: nullable(
-      object({
-        buildId: nullable(number),
-        buildDefinitionName: nullable(string),
-        isExpired: withDefault(boolean, false),
+const PolicyEvaluation = Schema.Struct({
+  evaluationId: Schema.String,
+  status: Schema.Literals(["queued", "running", "approved", "rejected", "notApplicable", "broken"]),
+  configuration: Schema.Struct({
+    isBlocking: Schema.Boolean,
+    isEnabled: Schema.Boolean,
+    type: Schema.Struct({ displayName: Schema.String }),
+    settings: nullable(
+      Schema.Struct({
+        displayName: nullable(Schema.String),
+        statusName: nullable(Schema.String),
+        statusGenre: nullable(Schema.String),
+        manualQueueOnly: withDefault(Schema.Boolean, false),
       }),
     ),
   }),
-);
+  context: nullable(
+    Schema.Struct({
+      buildId: nullable(Schema.Finite),
+      buildDefinitionName: nullable(Schema.String),
+      isExpired: withDefault(Schema.Boolean, false),
+    }),
+  ),
+});
+const PolicyEvaluations = Schema.Array(PolicyEvaluation);
 
-const threadStatus = nullable(literal(["unknown", "active", "fixed", "wontFix", "closed", "byDesign", "pending"]));
-const thread = object({
-  id: number,
-  status: threadStatus,
-  isDeleted: withDefault(boolean, false),
+const ThreadRecord = Schema.Struct({
+  id: Schema.Finite,
+  status: nullable(Schema.Literals(["unknown", "active", "fixed", "wontFix", "closed", "byDesign", "pending"])),
+  isDeleted: withDefault(Schema.Boolean, false),
   threadContext: nullable(
-    object({
-      filePath: nullable(string),
-      rightFileStart: nullable(object({ line: number })),
-      leftFileStart: nullable(object({ line: number })),
+    Schema.Struct({
+      filePath: nullable(Schema.String),
+      rightFileStart: nullable(Schema.Struct({ line: Schema.Finite })),
+      leftFileStart: nullable(Schema.Struct({ line: Schema.Finite })),
     }),
   ),
   comments: withDefault(
-    array(
-      object({
-        id: number,
-        content: withDefault(string, ""),
-        commentType: nullable(literal(["unknown", "text", "codeChange", "system"])),
-        isDeleted: withDefault(boolean, false),
-        publishedDate: withDefault(string, ""),
-        author: identity,
+    Schema.Array(
+      Schema.Struct({
+        id: Schema.Finite,
+        content: withDefault(Schema.String, ""),
+        commentType: nullable(Schema.Literals(["unknown", "text", "codeChange", "system"])),
+        isDeleted: withDefault(Schema.Boolean, false),
+        publishedDate: withDefault(Schema.String, ""),
+        author: Identity,
       }),
     ),
     [],
   ),
 });
-const threads = object({ value: array(thread), continuation_token: nullable(string) });
+const ThreadList = Schema.Struct({ value: Schema.Array(ThreadRecord), continuation_token: nullable(Schema.String) });
 
-const timeline = nullable(
-  object({
-    records: withDefault(
-      array(
-        object({
-          type: withDefault(string, ""),
-          name: withDefault(string, ""),
-          state: nullable(literal(["pending", "inProgress", "completed"])),
-          result: nullable(literal(["succeeded", "succeededWithIssues", "failed", "canceled", "skipped", "abandoned"])),
-          log: nullable(object({ id: number })),
-          issues: withDefault(array(object({ type: withDefault(string, ""), message: withDefault(string, "") })), []),
-        }),
-      ),
-      [],
-    ),
-  }),
-);
+const TimelineRecord = Schema.Struct({
+  type: withDefault(Schema.String, ""),
+  name: withDefault(Schema.String, ""),
+  state: nullable(Schema.Literals(["pending", "inProgress", "completed"])),
+  result: nullable(Schema.Literals(["succeeded", "succeededWithIssues", "failed", "canceled", "skipped", "abandoned"])),
+  log: nullable(Schema.Struct({ id: Schema.Finite })),
+  issues: withDefault(
+    Schema.Array(Schema.Struct({ type: withDefault(Schema.String, ""), message: withDefault(Schema.String, "") })),
+    [],
+  ),
+});
+const Timeline = Schema.NullOr(Schema.Struct({ records: withDefault(Schema.Array(TimelineRecord), []) }));
 
-type PullRequestRecord = Decoded<typeof pullRequest>;
-type PolicyEvaluation = Decoded<typeof policyEvaluations>[number];
-type ThreadRecord = Decoded<typeof thread>;
-type IdentityRecord = Decoded<typeof identity>;
-type TimelineRecord = NonNullable<Decoded<typeof timeline>>["records"][number];
+const PrListResponse = Schema.Array(Schema.Struct({ pullRequestId: Schema.Finite }));
+
+type PullRequestRecord = typeof PullRequestRecord.Type;
+type PolicyEvaluation = typeof PolicyEvaluation.Type;
+type ThreadRecord = typeof ThreadRecord.Type;
+type IdentityRecord = typeof Identity.Type;
+type TimelineRecord = typeof TimelineRecord.Type;
 
 /** Where the PR lives, as `az repos pr show` reports it. */
 type PrLocation = {
@@ -157,38 +143,35 @@ type PrLocation = {
   readonly webUrl: string;
 };
 
-type AzRunner = <T>(args: ReadonlyArray<string>, decoder: Decoder<T>) => Promise<Result<T, ForgeError>>;
+type Az = <S extends Schema.Decoder<unknown>>(args: ReadonlyArray<string>, schema: S) => Effect.Effect<S["Type"], ForgeError>;
 
 /**
- * Create a forge client for one Azure DevOps pull request.
+ * Create the forge client for one Azure DevOps pull request.
  *
- * @param runner - Runs `az`.
  * @param repo - The repository (organization URL, project, repository).
  * @param number - The pull request ID.
- * @returns A client bound to that pull request.
+ * @returns A client bound to that pull request, using the ambient `az` runner.
  */
-export function azureDevOpsClient(runner: CommandRunner, repo: AzureRepo, number: PrNumber): ForgeClient {
+export const makeAzureDevOpsClient = Effect.fnUntraced(function* (repo: AzureRepo, number: PrNumber) {
+  const runner = yield* CommandRunner;
   const org = repo.organizationUrl;
-  const az: AzRunner = async (args, decoder) => {
-    const stdout = await runner(["az", ...args, "--org", org, "--only-show-errors", "-o", "json"]);
-    return stdout._tag === "err" ? stdout : decodeJson(stdout.value, decoder);
-  };
-  const showPr = async (): Promise<Result<{ pr: PullRequestRecord; location: PrLocation }, ForgeError>> => {
-    const pr = await az(["repos", "pr", "show", "--id", String(number)], pullRequest);
-    if (pr._tag === "err") return pr;
-    const { repository } = pr.value;
-    return ok({
-      pr: pr.value,
-      location: {
-        projectId: repository.project.id,
-        projectName: repository.project.name,
-        repositoryId: repository.id,
-        webUrl: `${org}/${encodeURIComponent(repository.project.name)}/_git/${encodeURIComponent(
-          repository.name,
-        )}/pullrequest/${number}`,
-      },
-    });
-  };
+  const az: Az = (args, schema) =>
+    runner.run(["az", ...args, "--org", org, "--only-show-errors", "-o", "json"]).pipe(Effect.flatMap(decodeJson(schema)));
+
+  const showPr = Effect.gen(function* () {
+    const pr = yield* az(["repos", "pr", "show", "--id", String(number)], PullRequestRecord);
+    const { repository } = pr;
+    const location: PrLocation = {
+      projectId: repository.project.id,
+      projectName: repository.project.name,
+      repositoryId: repository.id,
+      webUrl: `${org}/${encodeURIComponent(repository.project.name)}/_git/${encodeURIComponent(
+        repository.name,
+      )}/pullrequest/${number}`,
+    };
+    return { pr, location };
+  });
+  const listPolicies = az(["repos", "pr", "policy", "list", "--id", String(number)], PolicyEvaluations);
   const threadRoute = (location: PrLocation) => [
     "--route-parameters",
     `project=${location.projectId}`,
@@ -196,79 +179,109 @@ export function azureDevOpsClient(runner: CommandRunner, repo: AzureRepo, number
     `pullRequestId=${number}`,
   ];
 
-  return {
-    target: { repo, number },
-
-    async observe(): Promise<Result<Observation, ForgeError>> {
-      const shown = await showPr();
-      if (shown._tag === "err") return shown;
-      const { pr, location } = shown.value;
-      const info = {
-        number: pr.pullRequestId,
-        url: location.webUrl,
-        title: pr.title,
-        state: prState(pr.status),
-        isDraft: pr.isDraft,
-        headSha: pr.lastMergeSourceCommit?.commitId ?? "unknown",
-        headBranch: stripRefsHeads(pr.sourceRefName),
-        baseBranch: stripRefsHeads(pr.targetRefName),
-      };
-      if (info.state !== "open") {
-        // Terminal: the stop must not depend on any further (possibly failing) call.
-        return ok({
-          forge: "azdo",
-          pr: info,
-          mergeability: { status: "unknown", detail: null },
-          reviewDecision: "none",
-          checks: [],
-          reviewItems: [],
-          viewer: null,
-          completeness: { _tag: "incomplete", reasons: ["the pull request is closed; checks and threads were not read"] },
-        });
-      }
-
-      const [policies, threadList] = await Promise.all([
-        az(["repos", "pr", "policy", "list", "--id", String(number)], policyEvaluations),
-        az(["devops", "invoke", "--area", "git", "--resource", "pullRequestThreads", ...threadRoute(location), "--api-version", "7.1"], threads),
-      ]);
-      if (policies._tag === "err") return policies;
-      if (threadList._tag === "err") return threadList;
-
-      const gaps: string[] = [];
-      if (threadList.value.continuation_token !== null) gaps.push("more PR threads than one page; later threads were not read");
-      const enabled = policies.value.filter((policy) => policy.configuration.isEnabled && policy.status !== "notApplicable");
-      const failedJobsByBuild = await failedJobsForBuilds(
-        az,
-        location,
-        org,
-        enabled.flatMap((policy) => {
-          const buildId = policy.context?.buildId ?? null;
-          // A running or failed build may already show failed tasks. Approved builds have none,
-          // and an expired result belongs to an older build, not this commit.
-          const current = policy.status !== "approved" && policy.context?.isExpired !== true;
-          return isBuildPolicy(policy) && buildId !== null && current ? [{ buildId, name: buildName(policy) }] : [];
-        }),
-        gaps,
-      );
-
-      return ok({
+  const observe: Effect.Effect<Observation, ForgeError> = Effect.gen(function* () {
+    const { pr, location } = yield* showPr;
+    const info = {
+      number: pr.pullRequestId,
+      url: location.webUrl,
+      title: pr.title,
+      state: prState(pr.status),
+      isDraft: pr.isDraft,
+      headSha: pr.lastMergeSourceCommit?.commitId ?? "unknown",
+      headBranch: stripRefsHeads(pr.sourceRefName),
+      baseBranch: stripRefsHeads(pr.targetRefName),
+    };
+    if (info.state !== "open") {
+      // Terminal: the stop must not depend on any further (possibly failing) call.
+      return {
         forge: "azdo",
         pr: info,
-        mergeability: mergeability(pr, enabled),
-        reviewDecision: reviewDecision(pr, enabled),
-        checks: enabled.flatMap((policy) => policyToChecks(policy, org, location, failedJobsByBuild)),
-        reviewItems: threadList.value.value.flatMap((record) => threadItems(record, location.webUrl)),
+        mergeability: { status: "unknown", detail: null },
+        reviewDecision: "none",
+        checks: [],
+        reviewItems: [],
         viewer: null,
-        completeness: gaps.length === 0 ? { _tag: "complete" } : { _tag: "incomplete", reasons: gaps },
-      });
-    },
+        completeness: { _tag: "incomplete", reasons: ["the pull request is closed; checks and threads were not read"] },
+      } as const;
+    }
 
-    async readThread(threadId) {
-      const id = Number(threadId);
-      if (!Number.isSafeInteger(id) || id <= 0) return err(new ThreadNotFound(threadId));
-      const shown = await showPr();
-      if (shown._tag === "err") return shown;
-      const record = await az(
+    const [policies, threadList] = yield* Effect.all(
+      [
+        listPolicies,
+        az(
+          ["devops", "invoke", "--area", "git", "--resource", "pullRequestThreads", ...threadRoute(location), "--api-version", "7.1"],
+          ThreadList,
+        ),
+      ],
+      { concurrency: "unbounded" },
+    );
+
+    const gaps: string[] = [];
+    if (threadList.continuation_token !== null) gaps.push("more PR threads than one page; later threads were not read");
+    const enabled = policies.filter((policy) => policy.configuration.isEnabled && policy.status !== "notApplicable");
+    const builds = enabled.flatMap((policy) => {
+      const buildId = policy.context?.buildId ?? null;
+      // A running or failed build may already show failed tasks. Approved builds have none,
+      // and an expired result belongs to an older build, not this commit.
+      const current = policy.status !== "approved" && policy.context?.isExpired !== true;
+      return isBuildPolicy(policy) && buildId !== null && current ? [{ buildId, name: buildName(policy) }] : [];
+    });
+    const timelines = yield* Effect.forEach(
+      builds,
+      ({ buildId, name }) =>
+        az(
+          [
+            "devops",
+            "invoke",
+            "--area",
+            "build",
+            "--resource",
+            "timeline",
+            "--route-parameters",
+            `project=${location.projectId}`,
+            `buildId=${buildId}`,
+            "--api-version",
+            "7.1",
+          ],
+          Timeline,
+        ).pipe(
+          Effect.map((records) => ({
+            buildId,
+            jobs: timelineFailures(records?.records ?? [], buildId, name, location, org),
+            gap: null,
+          })),
+          // A missing timeline only hides diagnosis detail; report it as a gap, not a failed poll.
+          Effect.catch((error) =>
+            Effect.succeed({ buildId, jobs: [], gap: `could not read the timeline of build ${buildId}: ${error.message}` }),
+          ),
+        ),
+      { concurrency: "unbounded" },
+    );
+    gaps.push(...timelines.flatMap((timeline) => (timeline.gap === null ? [] : [timeline.gap])));
+    const failedJobsByBuild = new Map(timelines.map((timeline) => [timeline.buildId, timeline.jobs]));
+
+    return {
+      forge: "azdo",
+      pr: info,
+      mergeability: mergeability(pr, enabled),
+      reviewDecision: reviewDecision(pr, enabled),
+      checks: enabled.flatMap((policy) => policyToChecks(policy, org, location, failedJobsByBuild)),
+      reviewItems: threadList.value.flatMap((record) => threadItems(record, location.webUrl)),
+      viewer: null,
+      completeness: gaps.length === 0 ? { _tag: "complete" } : { _tag: "incomplete", reasons: gaps },
+    };
+  });
+
+  return ForgeClient.of({
+    target: { repo, number },
+    observe,
+
+    readThread: (threadId) =>
+      Effect.gen(function* () {
+        const id = Number(threadId);
+        if (!Number.isSafeInteger(id) || id <= 0) return yield* new ThreadNotFound({ threadId });
+        const { location } = yield* showPr;
+        const record = yield* az(
           [
             "devops",
             "invoke",
@@ -276,71 +289,79 @@ export function azureDevOpsClient(runner: CommandRunner, repo: AzureRepo, number
             "git",
             "--resource",
             "pullRequestThreads",
-            ...threadRoute(shown.value.location),
+            ...threadRoute(location),
             `threadId=${id}`,
             "--api-version",
             "7.1",
           ],
-          thread,
+          ThreadRecord,
         );
-      if (record._tag === "err") return record;
-      const ref = record.value.isDeleted ? null : threadRef(record.value);
-      if (ref === null) return err(new ThreadNotFound(threadId));
-      const completeness: Completeness = { _tag: "complete" };
-      return ok({ thread: ref, completeness });
-    },
+        const ref = record.isDeleted ? null : threadRef(record);
+        if (ref === null) return yield* new ThreadNotFound({ threadId });
+        const completeness: Completeness = { _tag: "complete" };
+        return { thread: ref, completeness };
+      }),
 
-    async rerun(target, headSha) {
-      if (target._tag !== "azdo_policy") return err(new ShapeMismatch("$.target", "an Azure DevOps policy target"));
-      // `policy queue` builds whatever the PR head is now, not the commit the retry was charged
-      // to. Re-check both right before queueing; the remaining check-then-act window (a push in
-      // the next instant) is accepted: the new build then simply validates the newer commit.
-      const shown = await showPr();
-      if (shown._tag === "err") return shown;
-      const currentHead = shown.value.pr.lastMergeSourceCommit?.commitId ?? "unknown";
-      if (currentHead !== headSha) return ok({ _tag: "stale_head", currentHead });
-      const policies = await az(["repos", "pr", "policy", "list", "--id", String(number)], policyEvaluations);
-      if (policies._tag === "err") return policies;
-      const evaluation = policies.value.find((policy) => policy.evaluationId === target.evaluationId);
-      const status = evaluation === undefined ? "missing" : buildPolicyStatus(evaluation).status;
-      if (status !== "failed") return ok({ _tag: "not_terminal", status });
-      const queued = await runner([
-        "az",
-        "repos",
-        "pr",
-        "policy",
-        "queue",
-        "--id",
-        String(number),
-        "--evaluation-id",
-        target.evaluationId,
-        "--org",
-        org,
-        "--only-show-errors",
-        "-o",
-        "none",
-      ]);
-      return queued._tag === "err"
-        ? queued
-        : ok({ _tag: "triggered", detail: `az repos pr policy queue --id ${number} --evaluation-id ${target.evaluationId}` });
-    },
-  };
+    rerun: (target, headSha) =>
+      Effect.gen(function* () {
+        if (target._tag !== "azdo_policy") {
+          return yield* new ShapeMismatch({ path: "$.target", expected: "an Azure DevOps policy target" });
+        }
+        // `policy queue` builds whatever the PR head is now, not the commit the retry was charged
+        // to. Re-check both right before queueing; the remaining check-then-act window (a push in
+        // the next instant) is accepted: the new build then simply validates the newer commit.
+        const { pr } = yield* showPr;
+        const currentHead = pr.lastMergeSourceCommit?.commitId ?? "unknown";
+        if (currentHead !== headSha) return { _tag: "stale_head", currentHead } as const;
+        const policies = yield* listPolicies;
+        const evaluation = policies.find((policy) => policy.evaluationId === target.evaluationId);
+        const status = evaluation === undefined ? "missing" : buildPolicyStatus(evaluation).status;
+        if (status !== "failed") return { _tag: "not_terminal", status } as const;
+        yield* runner.run([
+          "az",
+          "repos",
+          "pr",
+          "policy",
+          "queue",
+          "--id",
+          String(number),
+          "--evaluation-id",
+          target.evaluationId,
+          "--org",
+          org,
+          "--only-show-errors",
+          "-o",
+          "none",
+        ]);
+        return {
+          _tag: "triggered",
+          detail: `az repos pr policy queue --id ${number} --evaluation-id ${target.evaluationId}`,
+        } as const;
+      }),
+  });
+});
+
+/**
+ * Live layer: the forge client for one Azure DevOps pull request.
+ *
+ * @param repo - The repository.
+ * @param number - The pull request ID.
+ * @returns A layer providing `ForgeClient`; it needs a `CommandRunner` for `az`.
+ */
+export function azureDevOpsForgeLayer(repo: AzureRepo, number: PrNumber): Layer.Layer<ForgeClient, never, CommandRunner> {
+  return Layer.effect(ForgeClient, makeAzureDevOpsClient(repo, number));
 }
 
 /**
  * Find the single active pull request whose source branch is `branch`.
  *
- * @param runner - Runs `az`.
  * @param repo - The repository from the git remote.
  * @param branch - The checked-out branch name.
  * @returns The pull request target, or `NoOpenPullRequest` for zero or several matches.
  */
-export async function findAzurePrForBranch(
-  runner: CommandRunner,
-  repo: AzureRepo,
-  branch: string,
-): Promise<Result<PrTarget, ForgeError | NoOpenPullRequest>> {
-  const stdout = await runner([
+export const findAzurePrForBranch = Effect.fnUntraced(function* (repo: AzureRepo, branch: string) {
+  const runner = yield* CommandRunner;
+  const stdout = yield* runner.run([
     "az",
     "repos",
     "pr",
@@ -359,49 +380,13 @@ export async function findAzurePrForBranch(
     "-o",
     "json",
   ]);
-  if (stdout._tag === "err") return stdout;
-  const decoded = decodeJson(stdout.value, array(object({ pullRequestId: number })));
-  if (decoded._tag === "err") return decoded;
-  const [only, ...rest] = decoded.value;
+  const found = yield* decodeJson(PrListResponse)(stdout);
+  const [only, ...rest] = found;
   const prNumber = only === undefined ? null : parsePrNumber(only.pullRequestId);
-  if (prNumber === null || rest.length > 0) return err(new NoOpenPullRequest(branch, decoded.value.length));
-  return ok({ repo, number: prNumber });
-}
-
-async function failedJobsForBuilds(
-  az: AzRunner,
-  location: PrLocation,
-  org: string,
-  builds: ReadonlyArray<{ readonly buildId: number; readonly name: string }>,
-  gaps: string[],
-): Promise<ReadonlyMap<number, ReadonlyArray<FailedJob>>> {
-  const entries = await Promise.all(
-    builds.map(async ({ buildId, name }) => {
-      const records = await az(
-        [
-          "devops",
-          "invoke",
-          "--area",
-          "build",
-          "--resource",
-          "timeline",
-          "--route-parameters",
-          `project=${location.projectId}`,
-          `buildId=${buildId}`,
-          "--api-version",
-          "7.1",
-        ],
-        timeline,
-      );
-      if (records._tag === "err") {
-        gaps.push(`could not read the timeline of build ${buildId}: ${records.error.message}`);
-        return [buildId, []] as const;
-      }
-      return [buildId, timelineFailures(records.value?.records ?? [], buildId, name, location, org)] as const;
-    }),
-  );
-  return new Map(entries);
-}
+  if (prNumber === null || rest.length > 0) return yield* new NoOpenPullRequest({ branch, found: found.length });
+  const target: PrTarget = { repo, number: prNumber };
+  return target;
+});
 
 function timelineFailures(
   records: ReadonlyArray<TimelineRecord>,

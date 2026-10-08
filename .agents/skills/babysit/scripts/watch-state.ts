@@ -1,6 +1,5 @@
-import { array, constant, number, object, string, withDefault } from "./decode.ts";
-import type { Decoder, ShapeMismatch } from "./decode.ts";
-import type { Result } from "./result.ts";
+import { Result, Schema } from "effect";
+import { withDefault } from "./decode.ts";
 
 /**
  * What the watcher remembers between polls of one pull request.
@@ -21,6 +20,17 @@ export type WatchState = {
   readonly celebratedShas: ReadonlyArray<string>;
 };
 
+/**
+ * The on-disk format, version 2. Missing or `null` lists read as empty, as they always have; any
+ * other version (including the pre-v2 single-SHA `retry` field) is rejected, never guessed at.
+ */
+export const WatchStateSchema = Schema.Struct({
+  version: Schema.Literal(2),
+  seenItemIds: withDefault(Schema.Array(Schema.String), []),
+  retries: withDefault(Schema.Array(Schema.Struct({ headSha: Schema.String, used: Schema.Finite })), []),
+  celebratedShas: withDefault(Schema.Array(Schema.String), []),
+});
+
 /** Seen IDs kept on disk; older ones are dropped first. */
 const SEEN_LIMIT = 5000;
 /** Head SHAs remembered for retries and celebrations; a PR rarely has this many live commits. */
@@ -29,21 +39,16 @@ const SHA_LIMIT = 50;
 /** The state of a pull request the watcher has never polled. */
 export const initial: WatchState = { version: 2, seenItemIds: [], retries: [], celebratedShas: [] };
 
-const decoder: Decoder<WatchState> = object({
-  version: constant(2),
-  seenItemIds: withDefault(array(string), []),
-  retries: withDefault(array(object({ headSha: string, used: number })), []),
-  celebratedShas: withDefault(array(string), []),
-});
+const decodeState = Schema.decodeUnknownResult(WatchStateSchema);
 
 /**
  * Parse a state file's JSON.
  *
  * @param input - The parsed JSON of a state file.
- * @returns The state, or a mismatch when the file is not a version-2 state file.
+ * @returns The state, or a schema failure when the file is not a version-2 state file.
  */
-export function parse(input: unknown): Result<WatchState, ShapeMismatch> {
-  return decoder(input, "$");
+export function parse(input: unknown): Result.Result<WatchState, Schema.SchemaError> {
+  return decodeState(input);
 }
 
 /**

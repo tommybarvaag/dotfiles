@@ -7,7 +7,7 @@ description: Babysit a GitHub or Azure DevOps pull request until it merges or cl
 
 You own the PR until a **strict stop**. A watcher script snapshots the PR, its CI, and its review feedback as JSON and tells you what to do next; you act on each snapshot and keep the watcher running.
 
-`$SKILL` below is the directory holding this file (installed at `~/.agents/skills/babysit`). The watcher needs Node 24+ and a logged-in `gh` (GitHub) or `az` with the `azure-devops` extension (Azure DevOps). It detects the forge from the PR URL or the `origin` remote.
+`$SKILL` below is the directory holding this file (installed at `~/.agents/skills/babysit`). The watcher needs Node 24+, its pinned npm dependencies (Preflight step 1), and a logged-in `gh` (GitHub) or `az` with the `azure-devops` extension (Azure DevOps). It detects the forge from the PR URL or the `origin` remote.
 
 ```sh
 node $SKILL/scripts/babysit.ts --pr auto --watch --requester <confirmed>   # follow the PR; one JSON snapshot per line
@@ -34,12 +34,13 @@ Everything else is a reason to keep watching: CI pending, an `idle` snapshot, a 
 
 ## 1. Preflight
 
-1. Confirm the forge CLI can read the target: `gh auth status` for GitHub; for Azure DevOps, `az devops project list --org <org-url> --top 1 -o none`, which works for `az login`, `az devops login`, and `AZURE_DEVOPS_EXT_PAT` alike.
-2. Confirm the **requester**, the person you babysit for, once per session in one question. Suggest the identity the CLI reports (`gh api user --jq .login`; for Azure DevOps `az account show --query user.name -o tsv`, the sign-in name) and ask the user to confirm or correct it. Pass the answer as `--requester` on every watcher command. The CLI's account is only a suggestion: if the user declines to answer, run without `--requester`, and every human thread write goes through the user.
-3. Check the working tree. Unrelated uncommitted changes are a blocker: ask the user before touching anything. Work happens on the PR's head branch only.
-4. Read the forge reference for this PR.
+1. Install the watcher's runtime dependencies once: if `$SKILL/scripts/node_modules` is missing, run `npm ci --omit=dev --prefix "$SKILL/scripts"`. Without network access, see [harnesses.md](references/harnesses.md). Only to change the scripts themselves: a full `npm ci --prefix "$SKILL/scripts"` adds the dev tooling for `npm test` and `npm run typecheck`.
+2. Confirm the forge CLI can read the target: `gh auth status` for GitHub; for Azure DevOps, `az devops project list --org <org-url> --top 1 -o none`, which works for `az login`, `az devops login`, and `AZURE_DEVOPS_EXT_PAT` alike.
+3. Confirm the **requester**, the person you babysit for, once per session in one question. Suggest the identity the CLI reports (`gh api user --jq .login`; for Azure DevOps `az account show --query user.name -o tsv`, the sign-in name) and ask the user to confirm or correct it. Pass the answer as `--requester` on every watcher command. The CLI's account is only a suggestion: if the user declines to answer, run without `--requester`, and every human thread write goes through the user.
+4. Check the working tree. Unrelated uncommitted changes are a blocker: ask the user before touching anything. Work happens on the PR's head branch only.
+5. Read the forge reference for this PR.
 
-Done when the CLI is authenticated, the requester is confirmed (or declined), the tree is clean or the user has cleared it, and you know the forge.
+Done when the dependencies are installed, the CLI is authenticated, the requester is confirmed (or declined), the tree is clean or the user has cleared it, and you know the forge.
 
 ## 2. Watch
 

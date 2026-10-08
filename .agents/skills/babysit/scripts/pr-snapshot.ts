@@ -5,6 +5,7 @@
  * Forge adapters (github.ts, azure-devops.ts) build an {@link Observation}; nothing in this module
  * knows about `gh`, `az`, or their JSON.
  */
+import { Schema } from "effect";
 import type { Forge } from "./pr-target.ts";
 import * as WatchState from "./watch-state.ts";
 
@@ -183,15 +184,19 @@ export type ThreadWriteEligibility =
  * What the agent should do next, in priority order within a snapshot.
  * `stop_*` actions are terminal and exclusive: a snapshot with one has no other action.
  */
-export type Action =
-  | "stop_pr_closed"
-  | "stop_merge_conflict"
-  | "process_review_comment"
-  | "diagnose_ci_failure"
-  | "retry_failed_checks"
-  | "celebrate_ci_green"
-  | "ready_to_merge"
-  | "idle";
+export const Action = Schema.Literals([
+  "stop_pr_closed",
+  "stop_merge_conflict",
+  "process_review_comment",
+  "diagnose_ci_failure",
+  "retry_failed_checks",
+  "celebrate_ci_green",
+  "ready_to_merge",
+  "idle",
+]);
+
+/** One next step for the agent; see {@link Action}. */
+export type Action = typeof Action.Type;
 
 /** Tunable policy for the decision. */
 export type WatchPolicy = {

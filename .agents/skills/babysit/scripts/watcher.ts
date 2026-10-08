@@ -5,7 +5,8 @@
  * Also owns the `--watch` loop policy (emit on change or heartbeat, stop on a terminal action,
  * tolerate transient errors) and the retry reservation protocol.
  */
-import type { ForgeClient, ForgeError, RerunResult, ThreadNotFound } from "./forge-client.ts";
+import { Context, DateTime, Duration, Effect, Layer, Ref, Result, Schedule, Schema } from "effect";
+import { ForgeClient, type ForgeError, type RerunResult, type ThreadNotFound } from "./forge-client.ts";
 import {
   decide,
   isTerminal,
@@ -17,30 +18,30 @@ import {
   type ThreadWriteEligibility,
   type WatchPolicy,
 } from "./pr-snapshot.ts";
-import { err, ok, type Result } from "./result.ts";
-import type { LockNeedsRecovery } from "./file-lock.ts";
-import type { StateBusy, StateFileError, StateStore } from "./state-store.ts";
+import { StateStore, type StateError } from "./state-store.ts";
 import * as WatchState from "./watch-state.ts";
 
 /** A snapshot could not be taken. */
-export type SnapshotError = ForgeError | StateFileError | StateBusy | LockNeedsRecovery;
+export type SnapshotError = ForgeError | StateError;
+
+/** Why `--retry-failed-now` offers no rerun. */
+export const NothingToRetryReason = Schema.Literals(["pr_stopped", "budget_exhausted", "no_retryable_failures"]);
 
 /** Raised by `--retry-failed-now` when the decision offers no rerun. Nothing is changed. */
-export class NothingToRetry extends Error {
-  readonly _tag = "NothingToRetry" as const;
+export class NothingToRetry extends Schema.TaggedError<NothingToRetry>()("NothingToRetry", {
   /** Why no rerun is offered. */
-  readonly reason: "pr_stopped" | "budget_exhausted" | "no_retryable_failures";
-
-  /** @param reason - Why no rerun is offered. */
-  constructor(reason: "pr_stopped" | "budget_exhausted" | "no_retryable_failures") {
-    super(
-      reason === "pr_stopped"
-        ? "The pull request is at a strict stop (closed or conflicting); nothing is rerun"
-        : reason === "budget_exhausted"
-          ? "The flaky-retry budget for this head SHA is spent; treat remaining failures as needing the user"
-          : "No failed check can be rerun right now (none failed, or the run or build is still in progress)",
-    );
-    this.reason = reason;
+  reason: NothingToRetryReason,
+}) {
+  /** Why nothing was rerun, in words the agent can relay. */
+  override get message(): string {
+    switch (this.reason) {
+      case "pr_stopped":
+        return "The pull request is at a strict stop (closed or conflicting); nothing is rerun";
+      case "budget_exhausted":
+        return "The flaky-retry budget for this head SHA is spent; treat remaining failures as needing the user";
+      case "no_retryable_failures":
+        return "No failed check can be rerun right now (none failed, or the run or build is still in progress)";
+    }
   }
 }
 
@@ -73,141 +74,172 @@ export type WatchEvent =
 
 /** Loop tuning for `--watch`. */
 export type WatchOptions = {
-  readonly intervalMs: number;
+  readonly interval: Duration.Input;
   /** Re-emit an unchanged snapshot on every Nth unchanged poll, as a heartbeat. */
   readonly heartbeatEvery: number;
   /** Give up after this many failed polls in a row. */
   readonly maxConsecutiveErrors: number;
 };
 
-/** Effects the watch loop needs from its host. */
-export type WatchIo = {
-  emit(event: WatchEvent): void;
-  sleep(ms: number): Promise<void>;
+/** Babysits one pull request through its forge client and state store. */
+export class Babysitter extends Context.Service<
+  Babysitter,
+  {
+    /** Take one snapshot and remember what it surfaced. */
+    readonly snapshot: Effect.Effect<Snapshot, SnapshotError>;
+    /**
+     * Rerun failed checks when the decision offers `retry_failed_checks`. The retry cycle is
+     * reserved and saved before the first rerun, so a crash or a partial failure still counts
+     * against the budget. A refusal changes nothing, not even seen review items.
+     */
+    readonly retryFailedNow: Effect.Effect<RetryOutcome, SnapshotError | NothingToRetry>;
+    /**
+     * Read one thread in full and decide whether the agent may reply to or resolve it on its own.
+     * Read-only; touches no state.
+     *
+     * @param threadId - The thread ID from a snapshot item.
+     * @returns The check, `ThreadNotFound`, or a forge failure.
+     */
+    readonly checkThread: (threadId: string) => Effect.Effect<ThreadCheck, ForgeError | ThreadNotFound>;
+    /**
+     * Poll on a fixed schedule until a terminal action (PR closed, user needed) or too many
+     * consecutive errors. Emits a snapshot when it differs from the last one emitted, or as a
+     * periodic heartbeat.
+     *
+     * @param options - Loop tuning.
+     * @param emit - Writes one event.
+     * @returns The terminal snapshot, or the last error once the error budget is spent.
+     */
+    readonly watch: <R>(
+      options: WatchOptions,
+      emit: (event: WatchEvent) => Effect.Effect<void, never, R>,
+    ) => Effect.Effect<Snapshot, SnapshotError, R>;
+  }
+>()("babysit/Babysitter") {
+  /**
+   * Build the service for one policy.
+   *
+   * @param policy - Trust and retry policy.
+   * @returns A layer that needs the PR's forge client and state store.
+   */
+  static layer(policy: WatchPolicy): Layer.Layer<Babysitter, never, ForgeClient | StateStore> {
+    return Layer.effect(
+      Babysitter,
+      Effect.gen(function* () {
+        const forge = yield* ForgeClient;
+        const store = yield* StateStore;
+        const observedAt = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+        const snapshot = Effect.gen(function* () {
+          const observation = yield* forge.observe;
+          const now = yield* observedAt;
+          return yield* store.transact((transaction) =>
+            Effect.gen(function* () {
+              const decision = decide(observation, transaction.state, policy, now);
+              yield* transaction.save(decision.state);
+              return decision.snapshot;
+            }),
+          );
+        });
+
+        const retryFailedNow = Effect.gen(function* () {
+          const observation = yield* forge.observe;
+          const now = yield* observedAt;
+          const { decided, retryTargets, used } = yield* store.transact((transaction) =>
+            Effect.gen(function* () {
+              const { snapshot: decided, retryTargets } = decide(observation, transaction.state, policy, now);
+              if (isTerminal(decided)) return yield* new NothingToRetry({ reason: "pr_stopped" });
+              if (retryTargets.length === 0) {
+                const exhausted = decided.ci.failed > 0 && decided.ci.retries.exhausted;
+                return yield* new NothingToRetry({ reason: exhausted ? "budget_exhausted" : "no_retryable_failures" });
+              }
+              const reserved = WatchState.reserveRetry(transaction.state, decided.pr.headSha);
+              yield* transaction.save(reserved);
+              return { decided, retryTargets, used: WatchState.retriesUsed(reserved, decided.pr.headSha) };
+            }),
+          );
+
+          // The cycle is committed; the reruns run outside the lock, one after another.
+          const headSha = decided.pr.headSha;
+          const reruns = yield* Effect.forEach(retryTargets, (target) =>
+            forge.rerun(target, headSha).pipe(
+              Effect.map((rerun): RerunOutcome => ({ ...rerun, target })),
+              Effect.catch((error) => Effect.succeed<RerunOutcome>({ _tag: "failed", target, error: error.message })),
+            ),
+          );
+          return { headSha, ci: decided.ci, reruns, retries: { used, budget: policy.retryBudget } };
+        });
+
+        const checkThread = (threadId: string) =>
+          forge.readThread(threadId).pipe(
+            Effect.map((observed) => ({
+              threadId: observed.thread.id,
+              resolved: observed.thread.resolved,
+              participants: observed.thread.participants,
+              threadWrite: threadWriteEligibility(observed, policy),
+            })),
+          );
+
+        const watch = <R>(options: WatchOptions, emit: (event: WatchEvent) => Effect.Effect<void, never, R>) =>
+          Effect.gen(function* () {
+            const loop = yield* Ref.make(initialLoop);
+            const poll = Effect.gen(function* () {
+              const polled = yield* Effect.result(snapshot);
+              const step = advance(yield* Ref.get(loop), polled, options);
+              yield* Ref.set(loop, step.next);
+              if (step.event !== null) yield* emit(step.event);
+              return step.outcome;
+            });
+            const outcome = yield* poll.pipe(
+              Effect.repeat({ schedule: Schedule.spaced(options.interval), until: (step) => step._tag === "stop" }),
+            );
+            if (outcome._tag !== "stop") return yield* Effect.die(new Error("the watch loop ended without a stop"));
+            return yield* Effect.fromResult(outcome.result);
+          });
+
+        return Babysitter.of({ snapshot, retryFailedNow, checkThread, watch });
+      }),
+    );
+  }
+}
+
+/** What the watch loop remembers between polls. */
+type LoopState = {
+  readonly lastFingerprint: string | null;
+  readonly silentPolls: number;
+  readonly consecutiveErrors: number;
 };
 
-/** Babysits one pull request through a forge client and a state store. */
-export class Babysitter {
-  readonly #forge: ForgeClient;
-  readonly #store: StateStore;
-  readonly #policy: WatchPolicy;
-  readonly #now: () => Date;
+/** One poll's effect on the loop: the next state, what to print, and whether to keep polling. */
+type LoopStep = {
+  readonly next: LoopState;
+  readonly event: WatchEvent | null;
+  readonly outcome: { readonly _tag: "continue" } | { readonly _tag: "stop"; readonly result: Result.Result<Snapshot, SnapshotError> };
+};
 
-  /**
-   * @param forge - The pull request's forge client.
-   * @param store - Where watch state persists.
-   * @param policy - Trust and retry policy.
-   * @param now - Clock for snapshot timestamps.
-   */
-  constructor(forge: ForgeClient, store: StateStore, policy: WatchPolicy, now: () => Date) {
-    this.#forge = forge;
-    this.#store = store;
-    this.#policy = policy;
-    this.#now = now;
+const initialLoop: LoopState = { lastFingerprint: null, silentPolls: 0, consecutiveErrors: 0 };
+const CONTINUE = { _tag: "continue" } as const;
+
+/** The watch loop's policy for one poll, as a pure transition. */
+function advance(state: LoopState, polled: Result.Result<Snapshot, SnapshotError>, options: WatchOptions): LoopStep {
+  if (Result.isFailure(polled)) {
+    const consecutiveErrors = state.consecutiveErrors + 1;
+    return {
+      next: { ...state, consecutiveErrors },
+      event: { _tag: "error", error: polled.failure, consecutive: consecutiveErrors },
+      outcome: consecutiveErrors >= options.maxConsecutiveErrors ? { _tag: "stop", result: polled } : CONTINUE,
+    };
   }
-
-  /**
-   * Take one snapshot and remember what it surfaced.
-   *
-   * @returns The snapshot, or the forge / state failure.
-   */
-  async snapshot(): Promise<Result<Snapshot, SnapshotError>> {
-    const observation = await this.#forge.observe();
-    if (observation._tag === "err") return observation;
-    return this.#store.transact(async (transaction): Promise<Result<Snapshot, SnapshotError>> => {
-      const decision = decide(observation.value, transaction.state, this.#policy, this.#now().toISOString());
-      const saved = await transaction.save(decision.state);
-      return saved._tag === "err" ? saved : ok(decision.snapshot);
-    });
-  }
-
-  /**
-   * Rerun failed checks when the decision offers `retry_failed_checks`.
-   *
-   * The retry cycle is reserved and saved before the first rerun, so a crash or a partial failure
-   * still counts against the budget. A refusal changes nothing, not even seen review items.
-   *
-   * @returns Per-target outcomes, `NothingToRetry`, or the forge / state failure.
-   */
-  async retryFailedNow(): Promise<Result<RetryOutcome, SnapshotError | NothingToRetry>> {
-    const observation = await this.#forge.observe();
-    if (observation._tag === "err") return observation;
-    type Reserved = { snapshot: Snapshot; retryTargets: ReadonlyArray<RetryTarget>; used: number };
-    const reservation = await this.#store.transact(async (transaction): Promise<Result<Reserved, SnapshotError | NothingToRetry>> => {
-      const { snapshot, retryTargets } = decide(observation.value, transaction.state, this.#policy, this.#now().toISOString());
-      if (isTerminal(snapshot)) return err(new NothingToRetry("pr_stopped"));
-      if (retryTargets.length === 0) {
-        const exhausted = snapshot.ci.failed > 0 && snapshot.ci.retries.exhausted;
-        return err(new NothingToRetry(exhausted ? "budget_exhausted" : "no_retryable_failures"));
-      }
-      const reserved = WatchState.reserveRetry(transaction.state, snapshot.pr.headSha);
-      const saved = await transaction.save(reserved);
-      if (saved._tag === "err") return saved;
-      return ok({ snapshot, retryTargets, used: WatchState.retriesUsed(reserved, snapshot.pr.headSha) });
-    });
-    if (reservation._tag === "err") return reservation;
-
-    // The cycle is committed; the reruns run outside the lock.
-    const { snapshot, retryTargets, used } = reservation.value;
-    const reruns: RerunOutcome[] = [];
-    for (const target of retryTargets) {
-      const rerun = await this.#forge.rerun(target, snapshot.pr.headSha);
-      reruns.push(rerun._tag === "ok" ? { ...rerun.value, target } : { _tag: "failed", target, error: rerun.error.message });
-    }
-    return ok({ headSha: snapshot.pr.headSha, ci: snapshot.ci, reruns, retries: { used, budget: this.#policy.retryBudget } });
-  }
-
-  /**
-   * Read one thread in full and decide whether the agent may reply to or resolve it on its own.
-   * Read-only; touches no state.
-   *
-   * @param threadId - The thread ID from a snapshot item.
-   * @returns The check, `ThreadNotFound`, or a forge failure.
-   */
-  async checkThread(threadId: string): Promise<Result<ThreadCheck, ForgeError | ThreadNotFound>> {
-    const observed = await this.#forge.readThread(threadId);
-    if (observed._tag === "err") return observed;
-    return ok({
-      threadId: observed.value.thread.id,
-      resolved: observed.value.thread.resolved,
-      participants: observed.value.thread.participants,
-      threadWrite: threadWriteEligibility(observed.value, this.#policy),
-    });
-  }
-
-  /**
-   * Poll until a terminal action (PR closed, user needed) or too many consecutive errors.
-   * Emits a snapshot when it differs from the last one emitted, or as a periodic heartbeat.
-   *
-   * @param options - Loop tuning.
-   * @param io - Output and sleeping.
-   * @returns The terminal snapshot, or the last error once the error budget is spent.
-   */
-  async watch(options: WatchOptions, io: WatchIo): Promise<Result<Snapshot, SnapshotError>> {
-    let lastFingerprint: string | null = null;
-    let silentPolls = 0;
-    let consecutiveErrors = 0;
-    for (;;) {
-      const snapshot = await this.snapshot();
-      if (snapshot._tag === "err") {
-        consecutiveErrors += 1;
-        io.emit({ _tag: "error", error: snapshot.error, consecutive: consecutiveErrors });
-        if (consecutiveErrors >= options.maxConsecutiveErrors) return snapshot;
-      } else {
-        consecutiveErrors = 0;
-        const fingerprint = fingerprintOf(snapshot.value);
-        if (fingerprint !== lastFingerprint || silentPolls + 1 >= options.heartbeatEvery) {
-          io.emit({ _tag: "snapshot", snapshot: snapshot.value });
-          lastFingerprint = fingerprint;
-          silentPolls = 0;
-        } else {
-          silentPolls += 1;
-        }
-        if (isTerminal(snapshot.value)) return snapshot;
-      }
-      await io.sleep(options.intervalMs);
-    }
-  }
+  const snapshot = polled.success;
+  const fingerprint = fingerprintOf(snapshot);
+  const emit = fingerprint !== state.lastFingerprint || state.silentPolls + 1 >= options.heartbeatEvery;
+  return {
+    next: emit
+      ? { lastFingerprint: fingerprint, silentPolls: 0, consecutiveErrors: 0 }
+      : { ...state, silentPolls: state.silentPolls + 1, consecutiveErrors: 0 },
+    event: emit ? { _tag: "snapshot", snapshot } : null,
+    outcome: isTerminal(snapshot) ? { _tag: "stop", result: polled } : CONTINUE,
+  };
 }
 
 function fingerprintOf(snapshot: Snapshot): string {

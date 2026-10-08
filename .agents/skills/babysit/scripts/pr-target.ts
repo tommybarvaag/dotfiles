@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { err, ok, type Result } from "./result.ts";
+import { Option, Redacted, Result, Schema } from "effect";
 
 /** A repository hosted on github.com (or a host forced to GitHub with `--forge github`). */
 export type GitHubRepo = {
@@ -24,8 +24,11 @@ export type RepoRef = GitHubRepo | AzureRepo;
 /** The forge a repository lives on. */
 export type Forge = RepoRef["_tag"];
 
+/** Schema of a positive pull request number, branded so only parsed numbers reach the adapters. */
+export const PrNumber = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PrNumber"));
+
 /** A positive pull request number. Construct with {@link parsePrNumber}. */
-export type PrNumber = number & { readonly __brand: "PrNumber" };
+export type PrNumber = typeof PrNumber.Type;
 
 /** A specific pull request on a specific repository. */
 export type PrTarget = { readonly repo: RepoRef; readonly number: PrNumber };
@@ -37,30 +40,24 @@ export type PrArgument =
   | { readonly _tag: "url"; readonly target: PrTarget };
 
 /** Raised when a `--pr` value is neither `auto`, a positive integer, nor a recognized PR URL. */
-export class InvalidPrArgument extends Error {
-  readonly _tag = "InvalidPrArgument" as const;
+export class InvalidPrArgument extends Schema.TaggedError<InvalidPrArgument>()("InvalidPrArgument", {
   /** The rejected argument, with any credentials redacted. */
-  readonly input: string;
-
-  /** @param input - The rejected argument. */
-  constructor(input: string) {
-    const safe = redactUrl(input);
-    super(`--pr must be "auto", a PR number, or a GitHub / Azure DevOps PR URL; got "${safe}"`);
-    this.input = safe;
+  input: Schema.String,
+}) {
+  /** What `--pr` accepts, echoing the redacted input. */
+  override get message(): string {
+    return `--pr must be "auto", a PR number, or a GitHub / Azure DevOps PR URL; got "${this.input}"`;
   }
 }
 
 /** Raised when a git remote URL does not point at a supported forge. */
-export class UnrecognizedRemote extends Error {
-  readonly _tag = "UnrecognizedRemote" as const;
+export class UnrecognizedRemote extends Schema.TaggedError<UnrecognizedRemote>()("UnrecognizedRemote", {
   /** The rejected remote URL, with any credentials redacted. */
-  readonly remote: string;
-
-  /** @param remote - The rejected remote URL; credentials in it are redacted before storing. */
-  constructor(remote: string) {
-    const safe = redactUrl(remote);
-    super(`Cannot tell the forge from remote "${safe}"; pass --forge github|azdo or a PR URL`);
-    this.remote = safe;
+  remote: Schema.String,
+}) {
+  /** How to tell the watcher the forge, echoing the redacted remote. */
+  override get message(): string {
+    return `Cannot tell the forge from remote "${this.remote}"; pass --forge github|azdo or a PR URL`;
   }
 }
 
@@ -70,6 +67,8 @@ export class UnrecognizedRemote extends Error {
  * Parsed with the WHATWG URL parser, which splits userinfo at the last `@` of the authority. Input
  * it cannot parse loses everything between `://` and the last `@`. SCP-style `git@host:path`
  * remotes carry a user name, not a secret, and are kept.
+ *
+ * `Redacted` hides a value completely; this keeps a remote readable enough to act on.
  *
  * @param url - A remote or PR URL as the user or git supplied it.
  * @returns The URL without userinfo, and with `***` in place of a query.
@@ -87,6 +86,8 @@ export function redactUrl(url: string): string {
   return input.replace(/^([a-z][a-z0-9+.-]*:\/\/).*@/i, "$1***@").replace(/\?[^#]*/, "?***");
 }
 
+const decodePrNumber = Schema.decodeUnknownOption(PrNumber);
+
 /**
  * Parse a pull request number.
  *
@@ -95,8 +96,7 @@ export function redactUrl(url: string): string {
  */
 export function parsePrNumber(input: string | number): PrNumber | null {
   const value = typeof input === "number" ? input : /^\d+$/.test(input) ? Number(input) : Number.NaN;
-  // SAFETY: the brand is applied only after the positive-integer check on the same value.
-  return Number.isSafeInteger(value) && value > 0 ? (value as PrNumber) : null;
+  return Number.isSafeInteger(value) ? Option.getOrNull(decodePrNumber(value)) : null;
 }
 
 const GITHUB_PR_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
@@ -110,13 +110,15 @@ const VSTS_PR_URL =
  * @param input - `auto`, a PR number, or a PR URL.
  * @returns The parsed argument, or `InvalidPrArgument`.
  */
-export function parsePrArgument(input: string): Result<PrArgument, InvalidPrArgument> {
+export function parsePrArgument(input: string): Result.Result<PrArgument, InvalidPrArgument> {
   const trimmed = input.trim();
-  if (trimmed === "auto") return ok({ _tag: "auto" });
+  if (trimmed === "auto") return Result.succeed({ _tag: "auto" });
   const number = parsePrNumber(trimmed);
-  if (number !== null) return ok({ _tag: "number", number });
+  if (number !== null) return Result.succeed({ _tag: "number", number });
   const target = parsePrUrl(trimmed);
-  return target === null ? err(new InvalidPrArgument(input)) : ok({ _tag: "url", target });
+  return target === null
+    ? Result.fail(new InvalidPrArgument({ input: redactUrl(input) }))
+    : Result.succeed({ _tag: "url", target });
 }
 
 /**
@@ -145,19 +147,24 @@ export function parsePrUrl(url: string): PrTarget | null {
 }
 
 /**
- * Parse a git remote URL into a repository on a supported forge.
+ * Parse a git remote URL into a repository on a supported forge. The remote stays `Redacted`
+ * until here because an HTTPS remote can embed a personal access token; only the parsed parts
+ * (which never include userinfo) and a redacted copy for errors leave this function.
  *
  * @param remote - Output of `git remote get-url origin` (HTTPS or SSH form).
  * @param forceForge - Interpret the remote as this forge, for SSH host aliases and similar.
  * @returns The repository, or `UnrecognizedRemote`.
  */
-export function parseRemoteUrl(remote: string, forceForge: Forge | null): Result<RepoRef, UnrecognizedRemote> {
-  const url = remote.trim();
+export function parseRemoteUrl(
+  remote: Redacted.Redacted<string>,
+  forceForge: Forge | null,
+): Result.Result<RepoRef, UnrecognizedRemote> {
+  const url = Redacted.value(remote).trim();
   const azure = parseAzureRemote(url);
-  if (azure !== null && forceForge !== "github") return ok(azure);
+  if (azure !== null && forceForge !== "github") return Result.succeed(azure);
   const github = parseGitHubRemote(url, forceForge === "github" ? "any" : "github.com");
-  if (github !== null && forceForge !== "azdo") return ok(github);
-  return err(new UnrecognizedRemote(remote));
+  if (github !== null && forceForge !== "azdo") return Result.succeed(github);
+  return Result.fail(new UnrecognizedRemote({ remote: redactUrl(url) }));
 }
 
 /**

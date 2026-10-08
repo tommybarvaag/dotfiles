@@ -1,26 +1,13 @@
 /**
  * GitHub adapter: GraphQL through `gh api graphql`, following every connection's cursor (checks,
- * review threads, each thread's comments, reviews, conversation comments), parsed into the
- * forge-neutral {@link Observation}. Reruns go through `gh run rerun --failed`.
+ * review threads, each thread's comments, reviews, conversation comments), parsed with Effect
+ * Schema into the forge-neutral {@link Observation}. Reruns go through `gh run rerun --failed`.
  */
-import type { CommandRunner } from "./command-runner.ts";
-import {
-  array,
-  boolean,
-  constant,
-  decodeJson,
-  either,
-  literal,
-  nullable,
-  number,
-  object,
-  ShapeMismatch,
-  string,
-  withDefault,
-  type Decoded,
-  type Decoder,
-} from "./decode.ts";
-import { ThreadNotFound, type ForgeClient, type ForgeError } from "./forge-client.ts";
+import { Effect, Layer, Schema } from "effect";
+import { CommandRunner } from "./command-runner.ts";
+import { casesHandled } from "./defects.ts";
+import { decodeJson, nullable, ShapeMismatch, withDefault } from "./decode.ts";
+import { ForgeClient, ThreadNotFound, type ForgeError } from "./forge-client.ts";
 import {
   identityKey,
   type AuthorRole,
@@ -36,7 +23,6 @@ import {
   type ReviewThread,
 } from "./pr-snapshot.ts";
 import { parsePrUrl, type GitHubRepo, type PrNumber, type PrTarget } from "./pr-target.ts";
-import { all, casesHandled, err, ok, type Result } from "./result.ts";
 
 /** Pages followed per connection before the observation is declared incomplete. */
 const MAX_PAGES = 50;
@@ -78,7 +64,7 @@ const THREAD_QUERY = `query($id: ID!) {
   node(id: $id) { ... on PullRequestReviewThread { ${THREAD_FIELDS}
     pullRequest { number repository { owner { login } name } } } } }`;
 
-const ASSOCIATIONS = [
+const Association = Schema.Literals([
   "MEMBER",
   "OWNER",
   "MANNEQUIN",
@@ -87,21 +73,25 @@ const ASSOCIATIONS = [
   "FIRST_TIME_CONTRIBUTOR",
   "FIRST_TIMER",
   "NONE",
-] as const;
+]);
+const ReviewState = Schema.Literals(["PENDING", "COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
 
-function page<N>(node: Decoder<N>) {
-  return object({ pageInfo: object({ hasNextPage: boolean, endCursor: nullable(string) }), nodes: array(node) });
+function page<N extends Schema.Top>(node: N) {
+  return Schema.Struct({
+    pageInfo: Schema.Struct({ hasNextPage: Schema.Boolean, endCursor: nullable(Schema.String) }),
+    nodes: Schema.Array(node),
+  });
 }
 
-const author = nullable(object({ __typename: string, login: string }));
+const Author = nullable(Schema.Struct({ __typename: Schema.String, login: Schema.String }));
 
-const checkRun = object({
-  __typename: constant("CheckRun"),
-  databaseId: number,
-  name: string,
-  status: literal(["REQUESTED", "QUEUED", "IN_PROGRESS", "COMPLETED", "WAITING", "PENDING"]),
+const CheckRunNode = Schema.Struct({
+  __typename: Schema.Literal("CheckRun"),
+  databaseId: Schema.Finite,
+  name: Schema.String,
+  status: Schema.Literals(["REQUESTED", "QUEUED", "IN_PROGRESS", "COMPLETED", "WAITING", "PENDING"]),
   conclusion: nullable(
-    literal([
+    Schema.Literals([
       "ACTION_REQUIRED",
       "TIMED_OUT",
       "CANCELLED",
@@ -113,301 +103,325 @@ const checkRun = object({
       "STALE",
     ]),
   ),
-  detailsUrl: nullable(string),
-  isRequired: withDefault(boolean, false),
+  detailsUrl: nullable(Schema.String),
+  isRequired: withDefault(Schema.Boolean, false),
   checkSuite: nullable(
-    object({
-      databaseId: number,
-      app: nullable(object({ databaseId: number, slug: string })),
+    Schema.Struct({
+      databaseId: Schema.Finite,
+      app: nullable(Schema.Struct({ databaseId: Schema.Finite, slug: Schema.String })),
       workflowRun: nullable(
-        object({
-          databaseId: number,
-          event: string,
-          workflow: nullable(object({ databaseId: number, name: string })),
+        Schema.Struct({
+          databaseId: Schema.Finite,
+          event: Schema.String,
+          workflow: nullable(Schema.Struct({ databaseId: Schema.Finite, name: Schema.String })),
         }),
       ),
     }),
   ),
 });
 
-const statusContext = object({
-  __typename: constant("StatusContext"),
-  context: string,
-  state: literal(["EXPECTED", "ERROR", "FAILURE", "PENDING", "SUCCESS"]),
-  targetUrl: nullable(string),
-  description: nullable(string),
-  isRequired: withDefault(boolean, false),
+const StatusContextNode = Schema.Struct({
+  __typename: Schema.Literal("StatusContext"),
+  context: Schema.String,
+  state: Schema.Literals(["EXPECTED", "ERROR", "FAILURE", "PENDING", "SUCCESS"]),
+  targetUrl: nullable(Schema.String),
+  description: nullable(Schema.String),
+  isRequired: withDefault(Schema.Boolean, false),
 });
 
-const contextNode = either(checkRun, statusContext);
+const ContextNode = Schema.Union([CheckRunNode, StatusContextNode]);
 
-const threadComment = object({
-  databaseId: number,
-  body: string,
-  url: string,
-  createdAt: string,
-  authorAssociation: literal(ASSOCIATIONS),
-  author,
-  pullRequestReview: nullable(object({ state: literal(["PENDING", "COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]) })),
+const ThreadCommentNode = Schema.Struct({
+  databaseId: Schema.Finite,
+  body: Schema.String,
+  url: Schema.String,
+  createdAt: Schema.String,
+  authorAssociation: Association,
+  author: Author,
+  pullRequestReview: nullable(Schema.Struct({ state: ReviewState })),
 });
 
-const thread = object({
-  id: string,
-  isResolved: boolean,
-  isOutdated: boolean,
-  path: nullable(string),
-  line: nullable(number),
-  comments: page(threadComment),
+const ThreadFields = {
+  id: Schema.String,
+  isResolved: Schema.Boolean,
+  isOutdated: Schema.Boolean,
+  path: nullable(Schema.String),
+  line: nullable(Schema.Finite),
+  comments: page(ThreadCommentNode),
+};
+const ThreadNode = Schema.Struct(ThreadFields);
+
+const ReviewNode = Schema.Struct({
+  databaseId: Schema.Finite,
+  state: ReviewState,
+  body: Schema.String,
+  url: Schema.String,
+  submittedAt: nullable(Schema.String),
+  authorAssociation: Association,
+  author: Author,
 });
 
-const review = object({
-  databaseId: number,
-  state: literal(["PENDING", "COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]),
-  body: string,
-  url: string,
-  submittedAt: nullable(string),
-  authorAssociation: literal(ASSOCIATIONS),
-  author,
+const IssueCommentNode = Schema.Struct({
+  databaseId: Schema.Finite,
+  body: Schema.String,
+  url: Schema.String,
+  createdAt: Schema.String,
+  authorAssociation: Association,
+  author: Author,
 });
 
-const issueComment = object({
-  databaseId: number,
-  body: string,
-  url: string,
-  createdAt: string,
-  authorAssociation: literal(ASSOCIATIONS),
-  author,
-});
-
-const rollup = object({
-  nodes: array(
-    object({
-      commit: object({ oid: string, statusCheckRollup: nullable(object({ contexts: page(contextNode) })) }),
+const Rollup = Schema.Struct({
+  nodes: Schema.Array(
+    Schema.Struct({
+      commit: Schema.Struct({
+        oid: Schema.String,
+        statusCheckRollup: nullable(Schema.Struct({ contexts: page(ContextNode) })),
+      }),
     }),
   ),
 });
 
-const prResponse = object({
-  data: object({
-    viewer: object({ login: string }),
-    repository: object({
-      pullRequest: object({
-        number: number,
-        url: string,
-        title: string,
-        state: literal(["OPEN", "CLOSED", "MERGED"]),
-        isDraft: boolean,
-        mergeable: literal(["MERGEABLE", "CONFLICTING", "UNKNOWN"]),
-        mergeStateStatus: literal(["DIRTY", "UNKNOWN", "BLOCKED", "BEHIND", "UNSTABLE", "HAS_HOOKS", "CLEAN", "DRAFT"]),
-        reviewDecision: nullable(literal(["CHANGES_REQUESTED", "APPROVED", "REVIEW_REQUIRED"])),
-        headRefName: string,
-        headRefOid: string,
-        baseRefName: string,
-        commits: rollup,
-        reviewThreads: page(thread),
-        reviews: page(review),
-        comments: page(issueComment),
-      }),
-    }),
+const PullRequestNode = Schema.Struct({
+  number: Schema.Finite,
+  url: Schema.String,
+  title: Schema.String,
+  state: Schema.Literals(["OPEN", "CLOSED", "MERGED"]),
+  isDraft: Schema.Boolean,
+  mergeable: Schema.Literals(["MERGEABLE", "CONFLICTING", "UNKNOWN"]),
+  mergeStateStatus: Schema.Literals(["DIRTY", "UNKNOWN", "BLOCKED", "BEHIND", "UNSTABLE", "HAS_HOOKS", "CLEAN", "DRAFT"]),
+  reviewDecision: nullable(Schema.Literals(["CHANGES_REQUESTED", "APPROVED", "REVIEW_REQUIRED"])),
+  headRefName: Schema.String,
+  headRefOid: Schema.String,
+  baseRefName: Schema.String,
+  commits: Rollup,
+  reviewThreads: page(ThreadNode),
+  reviews: page(ReviewNode),
+  comments: page(IssueCommentNode),
+});
+
+const PrResponse = Schema.Struct({
+  data: Schema.Struct({
+    viewer: Schema.Struct({ login: Schema.String }),
+    repository: Schema.Struct({ pullRequest: PullRequestNode }),
   }),
 });
 
-const pullRequestPage = <S extends Record<string, Decoder<unknown>>>(shape: S) =>
-  object({ data: object({ repository: object({ pullRequest: object(shape) }) }) });
+function pullRequestPage<const F extends Schema.Struct.Fields>(fields: F) {
+  return Schema.Struct({
+    data: Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct(fields) }) }),
+  });
+}
 
-const threadCommentsPage = object({ data: object({ node: nullable(object({ comments: page(threadComment) })) }) });
+const ThreadCommentsPage = Schema.Struct({
+  data: Schema.Struct({ node: nullable(Schema.Struct({ comments: page(ThreadCommentNode) })) }),
+});
 
-const threadResponse = object({
-  data: object({
+const ThreadResponse = Schema.Struct({
+  data: Schema.Struct({
     node: nullable(
-      object({
-        id: string,
-        isResolved: boolean,
-        isOutdated: boolean,
-        path: nullable(string),
-        line: nullable(number),
-        comments: page(threadComment),
-        pullRequest: object({ number: number, repository: object({ owner: object({ login: string }), name: string }) }),
+      Schema.Struct({
+        ...ThreadFields,
+        pullRequest: Schema.Struct({
+          number: Schema.Finite,
+          repository: Schema.Struct({ owner: Schema.Struct({ login: Schema.String }), name: Schema.String }),
+        }),
       }),
     ),
   }),
 });
 
-type Page<N> = { readonly pageInfo: { readonly hasNextPage: boolean; readonly endCursor: string | null }; readonly nodes: ReadonlyArray<N> };
-type PullRequestNode = Decoded<typeof prResponse>["data"]["repository"]["pullRequest"];
-type CheckRunNode = Decoded<typeof checkRun>;
-type StatusContextNode = Decoded<typeof statusContext>;
-type ContextNode = Decoded<typeof contextNode>;
-type ThreadNode = Decoded<typeof thread>;
-type ThreadCommentNode = Decoded<typeof threadComment>;
-type ReviewNode = Decoded<typeof review>;
-type IssueCommentNode = Decoded<typeof issueComment>;
-type AuthorNode = Decoded<typeof author>;
-type Association = (typeof ASSOCIATIONS)[number];
+const PrViewResponse = Schema.Struct({ url: Schema.String });
+
+type Page<N> = {
+  readonly pageInfo: { readonly hasNextPage: boolean; readonly endCursor: string | null };
+  readonly nodes: ReadonlyArray<N>;
+};
+type PullRequestNode = typeof PullRequestNode.Type;
+type CheckRunNode = typeof CheckRunNode.Type;
+type StatusContextNode = typeof StatusContextNode.Type;
+type ContextNode = typeof ContextNode.Type;
+type ThreadNode = typeof ThreadNode.Type;
+type ThreadCommentNode = typeof ThreadCommentNode.Type;
+type ReviewNode = typeof ReviewNode.Type;
+type IssueCommentNode = typeof IssueCommentNode.Type;
+type AuthorNode = typeof Author.Type;
+type Association = typeof Association.Type;
 
 /** Review threads with every comment page followed. */
 type FullThread = Omit<ThreadNode, "comments"> & { readonly comments: ReadonlyArray<ThreadCommentNode> };
 
 const TRUSTED_ASSOCIATIONS: ReadonlyArray<Association> = ["OWNER", "MEMBER", "COLLABORATOR"];
 
+/** Every node of a connection read, and why the read stopped early (empty when complete). */
+type Drained<N> = { readonly nodes: ReadonlyArray<N>; readonly gaps: ReadonlyArray<string> };
+
 /**
- * Create a forge client for one GitHub pull request.
+ * Create the forge client for one GitHub pull request.
  *
- * @param runner - Runs `gh`.
  * @param repo - The repository.
  * @param number - The pull request number.
- * @returns A client bound to that pull request.
+ * @returns A client bound to that pull request, using the ambient `gh` runner.
  */
-export function gitHubClient(runner: CommandRunner, repo: GitHubRepo, number: PrNumber): ForgeClient {
+export const makeGitHubClient = Effect.fnUntraced(function* (repo: GitHubRepo, number: PrNumber) {
+  const runner = yield* CommandRunner;
   const slug = `${repo.owner}/${repo.name}`;
-  const graphql = async <T>(query: string, variables: Readonly<Record<string, string | number>>, decoder: Decoder<T>) => {
+  const prVariables = { owner: repo.owner, repo: repo.name, number };
+
+  const graphql = <S extends Schema.Decoder<unknown>>(
+    query: string,
+    variables: Readonly<Record<string, string | number>>,
+    schema: S,
+  ): Effect.Effect<S["Type"], ForgeError> => {
     const args = Object.entries(variables).flatMap(([key, value]) =>
       typeof value === "number" ? ["-F", `${key}=${value}`] : ["-f", `${key}=${value}`],
     );
-    const stdout = await runner(["gh", "api", "graphql", ...args, "-f", `query=${query}`]);
-    return stdout._tag === "err" ? stdout : decodeJson(stdout.value, decoder);
+    return runner.run(["gh", "api", "graphql", ...args, "-f", `query=${query}`]).pipe(Effect.flatMap(decodeJson(schema)));
   };
-  const prVariables = { owner: repo.owner, repo: repo.name, number };
 
   /** Follow every remaining page of a thread's comments. */
-  const fullThread = async (node: ThreadNode): Promise<Result<Drained<FullThread>, ForgeError>> => {
-    const comments = await drain(node.comments, `comments of review thread ${node.id}`, async (cursor) => {
-      const next = await graphql(THREAD_COMMENTS_PAGE, { id: node.id, cursor }, threadCommentsPage);
-      return next._tag === "err" ? next : ok(next.value.data.node?.comments ?? null);
-    });
-    if (comments._tag === "err") return comments;
-    return ok({ nodes: [{ ...node, comments: comments.value.nodes }], gaps: comments.value.gaps });
-  };
-  return {
-    target: { repo, number },
+  const fullThread = (node: ThreadNode): Effect.Effect<Drained<FullThread>, ForgeError> =>
+    drain(node.comments, `comments of review thread ${node.id}`, (cursor) =>
+      graphql(THREAD_COMMENTS_PAGE, { id: node.id, cursor }, ThreadCommentsPage).pipe(
+        Effect.map((next) => next.data.node?.comments ?? null),
+      ),
+    ).pipe(Effect.map((comments) => ({ nodes: [{ ...node, comments: comments.nodes }], gaps: comments.gaps })));
 
-    async observe(): Promise<Result<Observation, ForgeError>> {
-      const first = await graphql(PR_QUERY, prVariables, prResponse);
-      if (first._tag === "err") return first;
-      const pr = first.value.data.repository.pullRequest;
-      const viewer = first.value.data.viewer.login;
-      const info = {
-        number: pr.number,
-        url: pr.url,
-        title: pr.title,
-        state: prState(pr.state),
-        isDraft: pr.isDraft,
-        headSha: pr.headRefOid,
-        headBranch: pr.headRefName,
-        baseBranch: pr.baseRefName,
-      };
-      const base = {
-        forge: "github",
-        pr: info,
-        mergeability: mergeability(pr.mergeable, pr.mergeStateStatus),
-        reviewDecision: reviewDecision(pr.reviewDecision),
-        viewer,
-      } as const;
-      if (info.state !== "open") {
-        // Terminal: the stop must not depend on any further (possibly failing) page.
-        const reasons = ["the pull request is closed; later pages were not read"];
-        return ok({ ...base, checks: [], reviewItems: [], completeness: { _tag: "incomplete", reasons } });
-      }
+  const observe: Effect.Effect<Observation, ForgeError> = Effect.gen(function* () {
+    const first = yield* graphql(PR_QUERY, prVariables, PrResponse);
+    const pr = first.data.repository.pullRequest;
+    const info = {
+      number: pr.number,
+      url: pr.url,
+      title: pr.title,
+      state: prState(pr.state),
+      isDraft: pr.isDraft,
+      headSha: pr.headRefOid,
+      headBranch: pr.headRefName,
+      baseBranch: pr.baseRefName,
+    };
+    const base = {
+      forge: "github",
+      pr: info,
+      mergeability: mergeability(pr.mergeable, pr.mergeStateStatus),
+      reviewDecision: reviewDecision(pr.reviewDecision),
+      viewer: first.data.viewer.login,
+    } as const;
+    if (info.state !== "open") {
+      // Terminal: the stop must not depend on any further (possibly failing) page.
+      const reasons = ["the pull request is closed; later pages were not read"];
+      return { ...base, checks: [], reviewItems: [], completeness: { _tag: "incomplete", reasons } };
+    }
 
-      const headCommit = pr.commits.nodes[0]?.commit ?? null;
-      // Independent connections are drained concurrently, outside any state lock.
-      const [contexts, threadNodes, reviews, comments] = await Promise.all([
-        drain(headCommit?.statusCheckRollup?.contexts ?? emptyPage<ContextNode>(), "checks", async (cursor) => {
-          const next = await graphql(CONTEXTS_PAGE, { ...prVariables, cursor }, pullRequestPage({ commits: rollup }));
-          if (next._tag === "err") return next;
-          const commit = next.value.data.repository.pullRequest.commits.nodes[0]?.commit ?? null;
-          // A push between pages would mix two commits' checks; report the gap instead.
-          return ok(commit === null || commit.oid !== headCommit?.oid ? null : (commit.statusCheckRollup?.contexts ?? null));
-        }),
-        drain(pr.reviewThreads, "review threads", async (cursor) => {
-          const next = await graphql(THREADS_PAGE, { ...prVariables, cursor }, pullRequestPage({ reviewThreads: page(thread) }));
-          return next._tag === "err" ? next : ok(next.value.data.repository.pullRequest.reviewThreads);
-        }),
-        drain(pr.reviews, "reviews", async (cursor) => {
-          const next = await graphql(REVIEWS_PAGE, { ...prVariables, cursor }, pullRequestPage({ reviews: page(review) }));
-          return next._tag === "err" ? next : ok(next.value.data.repository.pullRequest.reviews);
-        }),
-        drain(pr.comments, "conversation comments", async (cursor) => {
-          const next = await graphql(COMMENTS_PAGE, { ...prVariables, cursor }, pullRequestPage({ comments: page(issueComment) }));
-          return next._tag === "err" ? next : ok(next.value.data.repository.pullRequest.comments);
-        }),
-      ]);
-      if (contexts._tag === "err") return contexts;
-      if (threadNodes._tag === "err") return threadNodes;
-      if (reviews._tag === "err") return reviews;
-      if (comments._tag === "err") return comments;
-      const threads = all(await mapBounded(threadNodes.value.nodes, THREAD_CONCURRENCY, fullThread));
-      if (threads._tag === "err") return threads;
-
-      const gaps = [contexts, threadNodes, reviews, comments, ...threads.value.map((drained) => ok(drained))].flatMap(
-        (drained) => drained.value.gaps,
-      );
-      if (headCommit !== null && headCommit.oid !== pr.headRefOid) gaps.push("the head commit moved while reading checks");
-
-      return ok({
-        ...base,
-        checks: checks(contexts.value.nodes, slug),
-        reviewItems: reviewItems(
-          threads.value.flatMap((drained) => drained.nodes),
-          reviews.value.nodes,
-          comments.value.nodes,
+    const headCommit = pr.commits.nodes[0]?.commit ?? null;
+    // Independent connections are drained concurrently, outside any state lock.
+    const [contexts, threadNodes, reviews, comments] = yield* Effect.all(
+      [
+        drain(headCommit?.statusCheckRollup?.contexts ?? emptyPage<ContextNode>(), "checks", (cursor) =>
+          graphql(CONTEXTS_PAGE, { ...prVariables, cursor }, pullRequestPage({ commits: Rollup })).pipe(
+            Effect.map((next) => {
+              const commit = next.data.repository.pullRequest.commits.nodes[0]?.commit ?? null;
+              // A push between pages would mix two commits' checks; report the gap instead.
+              return commit === null || commit.oid !== headCommit?.oid ? null : (commit.statusCheckRollup?.contexts ?? null);
+            }),
+          ),
         ),
-        completeness: completenessOf(gaps),
-      });
-    },
+        drain(pr.reviewThreads, "review threads", (cursor) =>
+          graphql(THREADS_PAGE, { ...prVariables, cursor }, pullRequestPage({ reviewThreads: page(ThreadNode) })).pipe(
+            Effect.map((next) => next.data.repository.pullRequest.reviewThreads),
+          ),
+        ),
+        drain(pr.reviews, "reviews", (cursor) =>
+          graphql(REVIEWS_PAGE, { ...prVariables, cursor }, pullRequestPage({ reviews: page(ReviewNode) })).pipe(
+            Effect.map((next) => next.data.repository.pullRequest.reviews),
+          ),
+        ),
+        drain(pr.comments, "conversation comments", (cursor) =>
+          graphql(COMMENTS_PAGE, { ...prVariables, cursor }, pullRequestPage({ comments: page(IssueCommentNode) })).pipe(
+            Effect.map((next) => next.data.repository.pullRequest.comments),
+          ),
+        ),
+      ],
+      { concurrency: "unbounded" },
+    );
+    const threads = yield* Effect.forEach(threadNodes.nodes, fullThread, { concurrency: THREAD_CONCURRENCY });
 
-    async readThread(threadId) {
-      const response = await graphql(THREAD_QUERY, { id: threadId }, threadResponse);
-      if (response._tag === "err") return response;
-      const node = response.value.data.node;
-      const owner = node?.pullRequest.repository;
-      if (
-        node === null ||
-        node.pullRequest.number !== number ||
-        owner?.owner.login.toLowerCase() !== repo.owner.toLowerCase() ||
-        owner.name.toLowerCase() !== repo.name.toLowerCase()
-      ) {
-        return err(new ThreadNotFound(threadId));
+    const gaps = [contexts, threadNodes, reviews, comments, ...threads].flatMap((drained) => drained.gaps);
+    if (headCommit !== null && headCommit.oid !== pr.headRefOid) gaps.push("the head commit moved while reading checks");
+
+    return {
+      ...base,
+      checks: checks(contexts.nodes, slug),
+      reviewItems: reviewItems(
+        threads.flatMap((drained) => drained.nodes),
+        reviews.nodes,
+        comments.nodes,
+      ),
+      completeness: completenessOf(gaps),
+    };
+  });
+
+  return ForgeClient.of({
+    target: { repo, number },
+    observe,
+
+    readThread: (threadId) =>
+      Effect.gen(function* () {
+        const response = yield* graphql(THREAD_QUERY, { id: threadId }, ThreadResponse);
+        const node = response.data.node;
+        const owner = node?.pullRequest.repository;
+        if (
+          node === null ||
+          node.pullRequest.number !== number ||
+          owner?.owner.login.toLowerCase() !== repo.owner.toLowerCase() ||
+          owner.name.toLowerCase() !== repo.name.toLowerCase()
+        ) {
+          return yield* new ThreadNotFound({ threadId });
+        }
+        const full = yield* fullThread(node);
+        const [thread] = full.nodes;
+        if (thread === undefined) return yield* new ThreadNotFound({ threadId });
+        return { thread: threadRef(thread), completeness: completenessOf(full.gaps) };
+      }),
+
+    rerun: (target) => {
+      if (target._tag !== "github_run") {
+        return Effect.fail(new ShapeMismatch({ path: "$.target", expected: "a GitHub workflow run target" }));
       }
-      const full = await fullThread(node);
-      if (full._tag === "err") return full;
-      const [thread] = full.value.nodes;
-      if (thread === undefined) return err(new ThreadNotFound(threadId));
-      return ok({ thread: threadRef(thread), completeness: completenessOf(full.value.gaps) });
-    },
-
-    async rerun(target) {
-      if (target._tag !== "github_run") return err(new ShapeMismatch("$.target", "a GitHub workflow run target"));
       // Already SHA-bound: `gh run rerun <run-id>` re-executes that workflow run, whose head SHA is
       // fixed when the run is created. A rerun from a delayed observation reruns the old commit's
       // run (the SHA its budget was charged to) and never touches the current head's runs.
-      const rerun = await runner(["gh", "run", "rerun", String(target.runId), "--failed", "-R", slug]);
-      return rerun._tag === "err" ? rerun : ok({ _tag: "triggered", detail: `gh run rerun ${target.runId} --failed -R ${slug}` });
+      return runner
+        .run(["gh", "run", "rerun", String(target.runId), "--failed", "-R", slug])
+        .pipe(Effect.as({ _tag: "triggered", detail: `gh run rerun ${target.runId} --failed -R ${slug}` } as const));
     },
-  };
+  });
+});
+
+/**
+ * Live layer: the forge client for one GitHub pull request.
+ *
+ * @param repo - The repository.
+ * @param number - The pull request number.
+ * @returns A layer providing `ForgeClient`; it needs a `CommandRunner` for `gh`.
+ */
+export function gitHubForgeLayer(repo: GitHubRepo, number: PrNumber): Layer.Layer<ForgeClient, never, CommandRunner> {
+  return Layer.effect(ForgeClient, makeGitHubClient(repo, number));
 }
 
 /**
  * Find the open pull request for the checked-out branch, the way `gh pr view` does.
  *
- * @param runner - Runs `gh`.
  * @param cwd - The working tree.
  * @returns The pull request target.
  */
-export async function findGitHubPrForCurrentBranch(
-  runner: CommandRunner,
-  cwd: string,
-): Promise<Result<PrTarget, ForgeError>> {
-  const stdout = await runner(["gh", "pr", "view", "--json", "url"], { cwd });
-  if (stdout._tag === "err") return stdout;
-  const decoded = decodeJson(stdout.value, object({ url: string }));
-  if (decoded._tag === "err") return decoded;
-  const target = parsePrUrl(decoded.value.url);
-  return target === null ? err(new ShapeMismatch("$.url", "a GitHub pull request URL")) : ok(target);
-}
-
-/** Every node of a connection read, and why the read stopped early (empty when complete). */
-type Drained<N> = { readonly nodes: ReadonlyArray<N>; readonly gaps: ReadonlyArray<string> };
+export const findGitHubPrForCurrentBranch = Effect.fnUntraced(function* (cwd: string) {
+  const runner = yield* CommandRunner;
+  const stdout = yield* runner.run(["gh", "pr", "view", "--json", "url"], { cwd });
+  const view = yield* decodeJson(PrViewResponse)(stdout);
+  const target: PrTarget | null = parsePrUrl(view.url);
+  if (target === null) return yield* new ShapeMismatch({ path: "$.url", expected: "a GitHub pull request URL" });
+  return target;
+});
 
 /**
  * Collect every node of a cursor-paginated connection.
@@ -417,36 +431,23 @@ type Drained<N> = { readonly nodes: ReadonlyArray<N>; readonly gaps: ReadonlyArr
  * @param next - Fetches the page after a cursor; `null` means the data became inconsistent.
  * @returns All nodes read with this connection's gaps, or the forge failure.
  */
-async function drain<N>(
+function drain<N>(
   first: Page<N>,
   label: string,
-  next: (cursor: string) => Promise<Result<Page<N> | null, ForgeError>>,
-): Promise<Result<Drained<N>, ForgeError>> {
-  const nodes: N[] = [...first.nodes];
-  let pageInfo = first.pageInfo;
-  for (let pages = 1; pageInfo.hasNextPage; pages += 1) {
-    if (pageInfo.endCursor === null || pages >= MAX_PAGES) return ok({ nodes, gaps: [`${label}: stopped after ${pages} pages`] });
-    const fetched = await next(pageInfo.endCursor);
-    if (fetched._tag === "err") return fetched;
-    if (fetched.value === null) return ok({ nodes, gaps: [`${label}: the pull request changed while paging`] });
-    nodes.push(...fetched.value.nodes);
-    pageInfo = fetched.value.pageInfo;
-  }
-  return ok({ nodes, gaps: [] });
-}
-
-/** Map with at most `limit` calls in flight, keeping input order. */
-async function mapBounded<T, U>(items: ReadonlyArray<T>, limit: number, fn: (item: T) => Promise<U>): Promise<U[]> {
-  const results: U[] = [];
-  let index = 0;
-  const worker = async (): Promise<void> => {
-    for (let mine = index++; mine < items.length; mine = index++) {
-      const item = items[mine];
-      if (item !== undefined) results[mine] = await fn(item);
+  next: (cursor: string) => Effect.Effect<Page<N> | null, ForgeError>,
+): Effect.Effect<Drained<N>, ForgeError> {
+  return Effect.gen(function* () {
+    const nodes: N[] = [...first.nodes];
+    let pageInfo = first.pageInfo;
+    for (let pages = 1; pageInfo.hasNextPage; pages += 1) {
+      if (pageInfo.endCursor === null || pages >= MAX_PAGES) return { nodes, gaps: [`${label}: stopped after ${pages} pages`] };
+      const fetched = yield* next(pageInfo.endCursor);
+      if (fetched === null) return { nodes, gaps: [`${label}: the pull request changed while paging`] };
+      nodes.push(...fetched.nodes);
+      pageInfo = fetched.pageInfo;
     }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+    return { nodes, gaps: [] };
+  });
 }
 
 function emptyPage<N>(): Page<N> {

@@ -8,16 +8,19 @@
  *   node babysit.ts --pr <number|url> --check-thread <thread-id>
  *
  * Prints JSON to stdout: one snapshot (`--once`), one snapshot per line (`--watch`), or a retry
- * report. Exit codes: 0 success, 1 forge/state failure, 2 usage error.
+ * report. Exit codes: 0 success, 1 forge/state failure, 2 usage error, 130 interrupted.
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { setTimeout as sleep } from "node:timers/promises";
-import { findAzurePrForBranch, azureDevOpsClient } from "./azure-devops.ts";
-import { execFileRunner, type CommandRunner } from "./command-runner.ts";
-import type { ForgeClient } from "./forge-client.ts";
-import { findGitHubPrForCurrentBranch, gitHubClient } from "./github.ts";
+import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { Console, Duration, Effect, Layer, Redacted, Result, Schema } from "effect";
+import { findAzurePrForBranch, azureDevOpsForgeLayer } from "./azure-devops.ts";
+import { CommandRunner } from "./command-runner.ts";
+import { casesHandled } from "./defects.ts";
+import { FileLock } from "./file-lock.ts";
+import { findGitHubPrForCurrentBranch, gitHubForgeLayer } from "./github.ts";
 import { identityKey, type WatchPolicy } from "./pr-snapshot.ts";
 import {
   describeTarget,
@@ -28,8 +31,7 @@ import {
   type PrArgument,
   type PrTarget,
 } from "./pr-target.ts";
-import { casesHandled, err, ok, type Result } from "./result.ts";
-import { acquireWatcherLock, fileStateStore } from "./state-store.ts";
+import { StateStore } from "./state-store.ts";
 import { Babysitter, type WatchEvent } from "./watcher.ts";
 
 /** GitHub logins are unique and immutable per account, so well-known review bots can be defaults. */
@@ -79,7 +81,7 @@ type Config = {
   readonly mode: Mode;
   readonly pr: PrArgument;
   readonly forge: Forge | null;
-  readonly intervalMs: number;
+  readonly interval: Duration.Duration;
   /** Bot keys from `--review-bot`; GitHub adds its defaults once the forge is known. */
   readonly reviewBots: ReadonlyArray<string>;
   readonly requester: string | null;
@@ -88,38 +90,43 @@ type Config = {
 };
 
 /** Raised for an invalid command line. */
-class UsageError extends Error {
-  readonly _tag = "UsageError" as const;
+class UsageError extends Schema.TaggedError<UsageError>()("UsageError", { detail: Schema.String }) {
+  override get message(): string {
+    return this.detail;
+  }
 }
 
+function usageError(detail: string): Result.Result<never, UsageError> {
+  return Result.fail(new UsageError({ detail }));
+}
 
-function parseConfig(argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv): Result<Config | "help", UsageError> {
-  let parsed;
-  try {
-    parsed = parseArgs({
-      args: [...argv],
-      strict: true,
-      allowPositionals: false,
-      options: {
-        pr: { type: "string", default: "auto" },
-        once: { type: "boolean", default: false },
-        watch: { type: "boolean", default: false },
-        "retry-failed-now": { type: "boolean", default: false },
-        "check-thread": { type: "string" },
-        forge: { type: "string" },
-        interval: { type: "string", default: "60" },
-        "retry-budget": { type: "string", default: "3" },
-        "review-bot": { type: "string", multiple: true, default: [] },
-        requester: { type: "string" },
-        "state-dir": { type: "string" },
-        help: { type: "boolean", short: "h", default: false },
-      },
-    });
-  } catch (cause) {
-    return err(new UsageError(cause instanceof Error ? cause.message : String(cause)));
-  }
-  const values = parsed.values;
-  if (values.help) return ok("help");
+function parseConfig(argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv): Result.Result<Config | "help", UsageError> {
+  const parsed = Result.try({
+    try: () =>
+      parseArgs({
+        args: [...argv],
+        strict: true,
+        allowPositionals: false,
+        options: {
+          pr: { type: "string", default: "auto" },
+          once: { type: "boolean", default: false },
+          watch: { type: "boolean", default: false },
+          "retry-failed-now": { type: "boolean", default: false },
+          "check-thread": { type: "string" },
+          forge: { type: "string" },
+          interval: { type: "string", default: "60" },
+          "retry-budget": { type: "string", default: "3" },
+          "review-bot": { type: "string", multiple: true, default: [] },
+          requester: { type: "string" },
+          "state-dir": { type: "string" },
+          help: { type: "boolean", short: "h", default: false },
+        },
+      }),
+    catch: (cause) => new UsageError({ detail: cause instanceof Error ? cause.message : String(cause) }),
+  });
+  if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
+  const values = parsed.success.values;
+  if (values.help) return Result.succeed("help");
 
   const threadId = values["check-thread"];
   const modes: Mode[] = [
@@ -128,33 +135,29 @@ function parseConfig(argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv): Resul
     ...(values["retry-failed-now"] ? [{ _tag: "retry" } as const] : []),
     ...(threadId === undefined ? [] : [{ _tag: "check-thread", threadId } as const]),
   ];
-  if (modes.length > 1) {
-    return err(new UsageError("Pick one of --once, --watch, --retry-failed-now, --check-thread"));
-  }
-  if (threadId !== undefined && threadId.trim() === "") return err(new UsageError("--check-thread needs a thread ID"));
+  if (modes.length > 1) return usageError("Pick one of --once, --watch, --retry-failed-now, --check-thread");
+  if (threadId !== undefined && threadId.trim() === "") return usageError("--check-thread needs a thread ID");
 
   const pr = parsePrArgument(values.pr);
-  if (pr._tag === "err") return err(new UsageError(pr.error.message));
+  if (Result.isFailure(pr)) return usageError(pr.failure.message);
 
   const forge = values.forge ?? null;
-  if (forge !== null && forge !== "github" && forge !== "azdo") {
-    return err(new UsageError(`--forge must be github or azdo; got "${forge}"`));
-  }
-  if (forge !== null && pr.value._tag === "url" && pr.value.target.repo._tag !== forge) {
-    return err(new UsageError(`--forge ${forge} contradicts the ${pr.value.target.repo._tag} PR URL`));
+  if (forge !== null && forge !== "github" && forge !== "azdo") return usageError(`--forge must be github or azdo; got "${forge}"`);
+  if (forge !== null && pr.success._tag === "url" && pr.success.target.repo._tag !== forge) {
+    return usageError(`--forge ${forge} contradicts the ${pr.success.target.repo._tag} PR URL`);
   }
 
   const interval = Number(values.interval);
-  if (!Number.isFinite(interval) || interval < 5) return err(new UsageError("--interval must be at least 5 seconds"));
+  if (!Number.isFinite(interval) || interval < 5) return usageError("--interval must be at least 5 seconds");
   const budget = Number(values["retry-budget"]);
-  if (!Number.isSafeInteger(budget) || budget < 0) return err(new UsageError("--retry-budget must be a whole number"));
+  if (!Number.isSafeInteger(budget) || budget < 0) return usageError("--retry-budget must be a whole number");
 
   const stateHome = env["XDG_STATE_HOME"] ?? join(env["HOME"] ?? homedir(), ".local", "state");
-  return ok({
+  return Result.succeed({
     mode: modes[0] ?? { _tag: "once" },
-    pr: pr.value,
+    pr: pr.success,
     forge,
-    intervalMs: interval * 1000,
+    interval: Duration.seconds(interval),
     reviewBots: values["review-bot"].map(identityKey),
     requester: values.requester === undefined || values.requester.trim() === "" ? null : identityKey(values.requester),
     retryBudget: budget,
@@ -162,25 +165,21 @@ function parseConfig(argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv): Resul
   });
 }
 
-async function resolveTarget(
-  runner: CommandRunner,
-  config: Config,
-  cwd: string,
-): Promise<Result<PrTarget, Error>> {
-  if (config.pr._tag === "url") return ok(config.pr.target);
-
-  const remote = await runner(["git", "remote", "get-url", "origin"], { cwd });
-  if (remote._tag === "err") return remote;
-  const repo = parseRemoteUrl(remote.value, config.forge);
-  if (repo._tag === "err") return repo;
-
-  if (config.pr._tag === "number") return ok({ repo: repo.value, number: config.pr.number });
-
-  if (repo.value._tag === "github") return findGitHubPrForCurrentBranch(runner, cwd);
-  const branch = await runner(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd });
-  if (branch._tag === "err") return branch;
-  return findAzurePrForBranch(runner, repo.value, branch.value.trim());
-}
+/** Resolve `--pr` to one pull request, reading the origin remote and branch when needed. */
+const resolveTarget = Effect.fnUntraced(function* (config: Config, cwd: string) {
+  if (config.pr._tag === "url") return config.pr.target;
+  const runner = yield* CommandRunner;
+  // An HTTPS remote can embed a token; it stays redacted until the parser takes it apart.
+  const remote = Redacted.make(yield* runner.run(["git", "remote", "get-url", "origin"], { cwd }));
+  const repo = yield* Effect.fromResult(parseRemoteUrl(remote, config.forge));
+  if (config.pr._tag === "number") {
+    const target: PrTarget = { repo, number: config.pr.number };
+    return target;
+  }
+  if (repo._tag === "github") return yield* findGitHubPrForCurrentBranch(cwd);
+  const branch = yield* runner.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+  return yield* findAzurePrForBranch(repo, branch.trim());
+});
 
 function policyFor(config: Config, forge: Forge): WatchPolicy {
   const defaults = forge === "github" ? GITHUB_REVIEW_BOTS : [];
@@ -192,15 +191,15 @@ function policyFor(config: Config, forge: Forge): WatchPolicy {
   };
 }
 
-function clientFor(runner: CommandRunner, target: PrTarget): ForgeClient {
-  return target.repo._tag === "github"
-    ? gitHubClient(runner, target.repo, target.number)
-    : azureDevOpsClient(runner, target.repo, target.number);
+/** Wire the babysitter for one pull request: its forge client, its state file, and the file locks. */
+function babysitterLayer(config: Config, target: PrTarget, statePath: string) {
+  const forge =
+    target.repo._tag === "github" ? gitHubForgeLayer(target.repo, target.number) : azureDevOpsForgeLayer(target.repo, target.number);
+  const store = StateStore.layerFile(statePath).pipe(Layer.provide(FileLock.layer));
+  return Babysitter.layer(policyFor(config, target.repo._tag)).pipe(Layer.provideMerge(Layer.mergeAll(forge, store)));
 }
 
-function print(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
-}
+const print = (value: unknown) => Console.log(JSON.stringify(value));
 
 function errorJson(error: Error): { readonly error: { readonly tag: string; readonly message: string } } {
   const tag = Reflect.get(error, "_tag");
@@ -213,75 +212,79 @@ function renderEvent(event: WatchEvent): unknown {
     : { ...errorJson(event.error), consecutiveErrors: event.consecutive, maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS };
 }
 
-async function main(): Promise<number> {
-  const config = parseConfig(process.argv.slice(2), process.env);
-  if (config._tag === "err") {
-    process.stderr.write(`${config.error.message}\n\n${USAGE}`);
-    return 2;
-  }
-  if (config.value === "help") {
-    process.stdout.write(USAGE);
-    return 0;
-  }
-
-  const runner = execFileRunner();
-  const target = await resolveTarget(runner, config.value, process.cwd());
-  if (target._tag === "err") {
-    print(errorJson(target.error));
-    return 1;
-  }
-
-  const statePath = join(config.value.stateDir, `${stateKey(target.value)}.json`);
-  const babysitter = new Babysitter(
-    clientFor(runner, target.value),
-    fileStateStore(statePath),
-    policyFor(config.value, target.value.repo._tag),
-    () => new Date(),
+/** Print a command's result or its error as JSON, and turn it into an exit code. */
+function report<A, E extends Error, R>(effect: Effect.Effect<A, E, R>, succeeded: (value: A) => boolean = () => true) {
+  return effect.pipe(
+    Effect.matchEffect({
+      onFailure: (error) => print(errorJson(error)).pipe(Effect.as(1)),
+      onSuccess: (value) => print(value).pipe(Effect.as(succeeded(value) ? 0 : 1)),
+    }),
   );
+}
 
-  const mode = config.value.mode;
+/** Run the chosen mode against one pull request. */
+const runMode = Effect.fnUntraced(function* (config: Config, target: PrTarget, statePath: string) {
+  const babysitter = yield* Babysitter;
+  const mode = config.mode;
   switch (mode._tag) {
-    case "once": {
-      const snapshot = await babysitter.snapshot();
-      print(snapshot._tag === "ok" ? snapshot.value : errorJson(snapshot.error));
-      return snapshot._tag === "ok" ? 0 : 1;
-    }
-    case "retry": {
-      const outcome = await babysitter.retryFailedNow();
-      print(outcome._tag === "ok" ? outcome.value : errorJson(outcome.error));
-      return outcome._tag === "ok" && outcome.value.reruns.every((rerun) => rerun._tag !== "failed") ? 0 : 1;
-    }
-    case "check-thread": {
-      const check = await babysitter.checkThread(mode.threadId);
-      print(check._tag === "ok" ? check.value : errorJson(check.error));
-      return check._tag === "ok" ? 0 : 1;
-    }
-    case "watch": {
-      const lock = await acquireWatcherLock(statePath);
-      if (lock._tag === "err") {
-        print(errorJson(lock.error));
-        return 1;
-      }
-      const stop = (): void => {
-        void lock.value.release().then((released) => {
-          if (released._tag === "err") process.stderr.write(`babysit: ${released.error.message}\n`);
-          process.exit(130);
-        });
-      };
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
-      process.stderr.write(`babysit: watching ${describeTarget(target.value)} (state ${statePath})\n`);
-      const last = await babysitter.watch(
-        { intervalMs: config.value.intervalMs, heartbeatEvery: HEARTBEAT_EVERY, maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS },
-        { emit: (event) => print(renderEvent(event)), sleep: (ms) => sleep(ms) },
+    case "once":
+      return yield* report(babysitter.snapshot);
+    case "retry":
+      return yield* report(babysitter.retryFailedNow, (outcome) => outcome.reruns.every((rerun) => rerun._tag !== "failed"));
+    case "check-thread":
+      return yield* report(babysitter.checkThread(mode.threadId));
+    case "watch":
+      // The watcher lock lives in this scope: normal exit, failure and Ctrl-C (interruption) all release it.
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* StateStore;
+          const lock = yield* Effect.result(store.holdWatcherLock);
+          if (Result.isFailure(lock)) {
+            yield* print(errorJson(lock.failure));
+            return 1;
+          }
+          yield* Console.error(`babysit: watching ${describeTarget(target)} (state ${statePath})`);
+          const last = yield* Effect.result(
+            babysitter.watch(
+              { interval: config.interval, heartbeatEvery: HEARTBEAT_EVERY, maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS },
+              (event) => print(renderEvent(event)),
+            ),
+          );
+          const released = yield* Effect.result(lock.success.release);
+          if (Result.isFailure(released)) yield* print(errorJson(released.failure));
+          return Result.isSuccess(last) && Result.isSuccess(released) ? 0 : 1;
+        }),
       );
-      const released = await lock.value.release();
-      if (released._tag === "err") print(errorJson(released.error));
-      return last._tag === "ok" && released._tag === "ok" ? 0 : 1;
-    }
     default:
       return casesHandled(mode);
   }
-}
+});
 
-process.exitCode = await main();
+const main: Effect.Effect<number, never, NodeServices.NodeServices> = Effect.gen(function* () {
+  const parsed = parseConfig(process.argv.slice(2), process.env);
+  if (Result.isFailure(parsed)) {
+    yield* Console.error(`${parsed.failure.message}\n\n${USAGE.trimEnd()}`);
+    return 2;
+  }
+  if (parsed.success === "help") {
+    yield* Console.log(USAGE.trimEnd());
+    return 0;
+  }
+  const config = parsed.success;
+
+  const target = yield* Effect.result(resolveTarget(config, process.cwd()));
+  if (Result.isFailure(target)) {
+    yield* print(errorJson(target.failure));
+    return 1;
+  }
+  const statePath = join(config.stateDir, `${stateKey(target.success)}.json`);
+  return yield* runMode(config, target.success, statePath).pipe(Effect.provide(babysitterLayer(config, target.success, statePath)));
+}).pipe(Effect.provide(CommandRunner.layer));
+
+// Exit codes travel through `process.exitCode` so buffered stdout is flushed before Node exits.
+NodeRuntime.runMain(
+  main.pipe(
+    Effect.flatMap((code) => Effect.sync(() => void (process.exitCode = code))),
+    Effect.provide(NodeServices.layer),
+  ),
+);
