@@ -2,6 +2,8 @@
 
 `rex skill show` and `rex <command> --help` are the authority for commands and flags. This file holds only what they leave out: how Claude Code and Codex behave inside Rex, and the patterns the loop relies on. Pass `-s "$REX_SESSION"` on every command, and `-b <block>` on every command that acts on an agent: without `-b`, Rex picks `$REX_BLOCK`, your own pane.
 
+This file and `turn.lua` are this skill's own. `/rex-implement` shares neither, because it runs one-shot reviewers through its own `scripts/review.lua` and keeps no agent in a pane.
+
 ## Addressing agents
 
 Address every agent by the block ID its start command returned. A block ID survives `/clear` and `/new`; a label can match several blocks.
