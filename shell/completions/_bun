@@ -1,0 +1,4 @@
+#compdef bun
+# Homebrew's _bun defines its functions but doesn't call _bun when autoloaded,
+# so the first Tab would complete nothing. Load it, then run it.
+source "${HOMEBREW_PREFIX:-/opt/homebrew}/share/zsh/site-functions/_bun" && _bun "$@"

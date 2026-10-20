@@ -5,8 +5,9 @@ if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 fi
 
-export DOTFILES="$HOME/.dotfiles"
-export DOTFILES_LOCAL_ENV="${DOTFILES}/.env"
+# Resolve the repo from this file's real path so any checkout or worktree works.
+export DOTFILES="${${(%):-%x}:A:h:h}"
+export DOTFILES_LOCAL_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/.env"
 
 if [[ -f "$DOTFILES_LOCAL_ENV" ]]; then
   source "$DOTFILES_LOCAL_ENV"
@@ -23,73 +24,79 @@ export LESS_TERMCAP_so=$'\E[01;33m'
 export LESS_TERMCAP_se=$'\E[0m'
 export LESS_TERMCAP_us=$'\E[1;36m'
 export LESS_TERMCAP_ue=$'\E[0m'
-export PATH="$DOTFILES/tools/git-fuzzy/bin:$HOME/.local/bin:$PATH"
 
-if [[ -n "${DOTFILES_EXTRA_PATHS:-}" ]]; then
-  export PATH="$PATH:$DOTFILES_EXTRA_PATHS"
-fi
+: ${HOMEBREW_PREFIX:=/opt/homebrew}
+ZSH_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zsh"
+[[ -d "$ZSH_CACHE_DIR" ]] || mkdir -p "$ZSH_CACHE_DIR"
 
-export ZSH="$HOME/.oh-my-zsh"
-export ZSH_CUSTOM="$DOTFILES/shell"
-ZSH_THEME=""
-HIST_STAMPS="dd/mm/yyyy"
+# PATH first: every PATH change empties zsh's command hash.
+source "$DOTFILES/shell/path.zsh"
+source "$DOTFILES/shell/options.zsh"
+source "$DOTFILES/shell/completion.zsh"
 
-source "$ZSH/oh-my-zsh.sh"
+# Source a tool's generated init script from a cache. The file name includes
+# the binary's resolved path, which changes on every Homebrew upgrade.
+_cached_init() {
+  local bin=${commands[$1]:A}
+  [[ -n $bin ]] || return 0
+  local cache="$ZSH_CACHE_DIR/init-${${:-$bin $*}//[^[:alnum:]]/_}.zsh"
+  if [[ ! -s $cache ]]; then
+    command rm -f "$ZSH_CACHE_DIR"/init-*_bin_$1_*(N)
+    "$@" >| $cache || return
+    zcompile $cache
+  fi
+  source $cache
+}
 
-if [[ -r /opt/homebrew/share/powerlevel10k/powerlevel10k.zsh-theme ]]; then
-  source /opt/homebrew/share/powerlevel10k/powerlevel10k.zsh-theme
-elif [[ -r /usr/local/share/powerlevel10k/powerlevel10k.zsh-theme ]]; then
-  source /usr/local/share/powerlevel10k/powerlevel10k.zsh-theme
-fi
-
-[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
-
-if command -v fnm >/dev/null 2>&1; then
-  eval "$(fnm env --use-on-cd)"
-fi
-
-if command -v zoxide >/dev/null 2>&1; then
-  eval "$(zoxide init zsh)"
-fi
-
-if [[ -s "$HOME/.bun/_bun" ]]; then
-  source "$HOME/.bun/_bun"
-fi
-
-if [[ -f "$HOME/.fzf.zsh" ]]; then
-  source "$HOME/.fzf.zsh"
-fi
+_cached_init zoxide init zsh
+_cached_init fzf --zsh
 
 export FZF_DEFAULT_COMMAND='fd --type f --strip-cwd-prefix'
 export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
 export FZF_DEFAULT_OPTS='--height=40% --preview="bat --color=always --style=numbers --line-range=:200 {} 2>/dev/null" --preview-window=right:60%:wrap'
 export FZF_CTRL_T_OPTS="--preview 'bat -n --color=always --line-range=:200 {} 2>/dev/null || eza --tree --icons --color=always --level=2 {} 2>/dev/null'"
+export FZF_CTRL_R_OPTS='--preview-window=hidden'
+export FZF_ALT_C_OPTS="--preview 'eza --tree --icons --color=always --level=2 {} 2>/dev/null'"
 export GF_PREFERRED_PAGER="delta"
 export GF_BAT_STYLE="numbers"
 
-# .NET SDK
-export DOTNET_ROOT="$HOME/.dotnet"
-export PATH="$DOTNET_ROOT:$PATH"
+# fnm costs ~14 ms per shell and leaves a symlink behind each time, so it only
+# starts in a directory its cd hook would act on, or when `fnm` is run. Until
+# then the default Node is on PATH directly.
+if (( $+commands[fnm] )); then
+  export FNM_DIR="${FNM_DIR:-$HOME/.local/share/fnm}"
+  path=("$FNM_DIR/aliases/default/bin" $path)
 
-# Added by LM Studio CLI (lms)
-export PATH="$PATH:/Users/tommy.lunde.barvag/.lmstudio/bin"
-# End of LM Studio CLI section
+  _fnm_init() {
+    chpwd_functions=(${chpwd_functions:#_fnm_lazy})
+    unfunction fnm _fnm_init _fnm_lazy
+    path=(${path:#${(b)FNM_DIR}/aliases/default/bin})
+    eval "$(command fnm env --use-on-cd --shell zsh)"
+  }
+  _fnm_lazy() {
+    [[ -f .node-version || -f .nvmrc || -f package.json ]] || return 0
+    _fnm_init
+    _fnm_autoload_hook
+  }
+  fnm() {
+    _fnm_init
+    command fnm "$@"
+  }
 
+  chpwd_functions+=(_fnm_lazy)
+  _fnm_lazy
+fi
 
-# nub
-export PATH="$HOME/.nub/bin:$PATH"
+source "$DOTFILES/shell/aliases.zsh"
+source "$DOTFILES/shell/functions.zsh"
 
-# >>> grok installer >>>
-export PATH="$HOME/.grok/bin:$PATH"
-fpath=(~/.grok/completions/zsh $fpath)
-autoload -Uz compinit && compinit -C
-# <<< grok installer <<<
-
-# opencode
-export PATH=/Users/tommy.lunde.barvag/.opencode/bin:$PATH
-
-# bun completions
-[ -s "/Users/tommy.lunde.barvag/.bun/_bun" ] && source "/Users/tommy.lunde.barvag/.bun/_bun"
-
-# Added by Devin
-export PATH="/Users/tommy.lunde.barvag/.codeium/windsurf/bin:$PATH"
+if [[ -r "$HOMEBREW_PREFIX/share/powerlevel10k/powerlevel10k.zsh-theme" ]]; then
+  # p10k forks `who -m` (~4 ms) to spot SSH sessions that lost their SSH_*
+  # variables. A local terminal can tell it up front.
+  if [[ -z "$SSH_CONNECTION$SSH_CLIENT$SSH_TTY" ]]; then
+    typeset -gix P9K_SSH=0
+    typeset -gx _P9K_SSH_TTY=$TTY
+  fi
+  source "$HOMEBREW_PREFIX/share/powerlevel10k/powerlevel10k.zsh-theme"
+  source "$DOTFILES/shell/.p10k.zsh"
+fi

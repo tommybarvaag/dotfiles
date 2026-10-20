@@ -94,3 +94,22 @@ extract() {
       ;;
   esac
 }
+
+# Carried over from oh-my-zsh
+d() {
+  if [[ -n $1 ]]; then
+    dirs "$@"
+  else
+    dirs -v | head -n 10
+  fi
+}
+compdef _dirs d
+
+diff() {
+  command diff --color "$@"
+}
+
+# Dated history; with arguments, behaves like `fc -l` (e.g. `history -20`).
+history() {
+  builtin fc -lt '%d/%m/%Y' "${@:-1}"
+}

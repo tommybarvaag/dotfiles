@@ -73,15 +73,6 @@ ensure_homebrew() {
   fi
 }
 
-ensure_oh_my_zsh() {
-  if [[ -d "$HOME/.oh-my-zsh" ]]; then
-    return
-  fi
-
-  log_step "Installing Oh My Zsh"
-  RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/HEAD/tools/install.sh)"
-}
-
 backup_target() {
   local target="$1"
   local backup="${target}.backup.${TIMESTAMP}"
@@ -242,7 +233,6 @@ ensure_hushlogin() {
 main() {
   ensure_xcode_cli
   ensure_homebrew
-  ensure_oh_my_zsh
 
   log_step "Linking managed dotfiles"
   link_file "$DOTFILES/shell/.zprofile" "$HOME/.zprofile"
