@@ -1,46 +1,43 @@
--- Open one Rex window with a pane per one-shot reviewer, wait until every reviewer has ended, and report.
+-- Open a pane per one-shot reviewer, wait until every reviewer has ended, and report.
 --
---   rex do --fail-fast -s SESSION review.lua --args @/abs/run/PR1-R1-review.json
+--   rex do --fail-fast -s SESSION -b BLOCK review.lua --args @/abs/run/PR1-R1-review.json
 --
--- The JSON file holds:
---   window     the tab's label, such as "Review PR1 R1"
---   cwd        the worktree every reviewer runs in
---   limit      seconds to wait before giving up, default 3600
---   reviewers  a list of { role, report, command, tee }. command is the argv the pane runs.
---              report is the file that receives the reviewer's final message: the CLI writes
---              it (codex exec -o), or, with tee = true, the pane copies the CLI's stdout into it.
+-- references/rex-ops.md#rounds holds the contract, and references/rex-ops.md#teardown says how to close the panes.
 --
--- The commands live in the file, so this watcher's own command line names no reviewer CLI,
+-- The commands live in the spec file, so this watcher's own command line names no reviewer CLI,
 -- and a pkill -f aimed at one leaves the watcher running.
---
--- Removes each report file before the panes start, so a report from an earlier attempt never counts.
--- Takes a snapshot of cwd before the panes start and again at the end.
--- Prints one JSON line once the panes start: { window_id, blocks = { role = block_id } }.
--- Prints one JSON line at the end:
---   { window_id, snapshot = { before, after, changed }, reviewers = [ { role, block_id, state, exit_code, msg, report, complete } ] }.
--- state is "exited" (the CLI exited), "closed" (its pane closed first) or "running" (the limit passed first).
--- complete is true when the report exists and has an END-OF-FINDINGS line.
--- changed is true when a reviewer edited the worktree. snapshot.error replaces after when the second snapshot fails.
--- Exit 0: every reviewer ended. 1: the first snapshot failed, the window could not open, or the script failed.
--- 2: the limit passed first. 64: bad arguments.
--- The window stays open after the end. Close it with rex window close once the reports are read.
 local shell = "com.superlogical.terminal.shell"
+local terminal = "com.superlogical.terminal"
 local args = rex.args
 local reviewers = args.reviewers
 local limit = args.limit or 3600
-local results = {}
-local order = {}
-local pending = 0
-local window_id
+-- Seconds a reviewer gets to exit after Ctrl-C before its pane is closed.
+local grace = 15
+local by_block = {}
+local pending
+local stopping = false
 local before
 
+-- One throwaway index serves both snapshots, so the second rehashes only what changed and the real index stays untouched.
+local index = os.tmpname()
+os.remove(index)
+
 local function fail(message, code)
+  os.remove(index)
   io.stderr:write(message .. "\n")
   rex.stop(code)
 end
 
-if type(args.window) ~= "string" or type(args.cwd) ~= "string" or type(reviewers) ~= "table" or #reviewers == 0 then
-  fail("--args takes window, cwd and a non-empty reviewers list", 64)
+if type(args.cwd) ~= "string" or type(reviewers) ~= "table" or #reviewers == 0 then
+  fail("--args takes cwd and a non-empty reviewers list", 64)
+end
+
+if args.window == nil then
+  if rex.block_id == nil then
+    fail("pass -b with the block to split beside, or set window in --args", 64)
+  end
+elseif type(args.window) ~= "string" then
+  fail("window takes a tab label", 64)
 end
 
 for _, r in ipairs(reviewers) do
@@ -68,65 +65,81 @@ local function complete(path)
   return false
 end
 
--- The tree hash of the whole worktree, built in a throwaway index so the real one stays untouched.
--- git status lists names only, so it misses a reviewer's edit to a file the executor already changed. The hash changes.
-local function snapshot()
-  local index = os.tmpname()
-  os.remove(index)
+-- read-tree -m first puts every tracked file back in the index and keeps the stat data of unchanged ones.
+-- Without it, add -A skips a tracked file under an ignored directory once an earlier snapshot dropped it,
+-- so a reviewer who restores that file leaves the hash unchanged.
+local steps = {
+  { "git", "read-tree", "-m", "HEAD" },
+  { "git", "add", "-A" },
+  { "git", "write-tree" },
+}
 
-  local opts = { cwd = args.cwd, env = { GIT_INDEX_FILE = index } }
-  local steps = { { "git", "read-tree", "HEAD" }, { "git", "add", "-A" }, { "git", "write-tree" } }
+-- The tree hash of the whole worktree.
+-- git status lists names only, so it misses a reviewer's edit to a file the executor already changed. The hash changes.
+-- The timeout bounds a git add stuck in a clean filter, such as LFS waiting for credentials.
+local function snapshot()
+  local opts = { cwd = args.cwd, env = { GIT_INDEX_FILE = index }, timeout = 120 }
   local r, err
 
   for _, argv in ipairs(steps) do
     r, err = rex.exec(argv, opts)
-    if r == nil or not r.ok then
-      os.remove(index)
-      return nil, err or (table.concat(argv, " ") .. ": " .. r.stderr)
+    if r == nil then
+      return nil, err
+    end
+    if r.timed_out then
+      return nil, table.concat(argv, " ") .. ": timed out after " .. opts.timeout .. " seconds"
+    end
+    if not r.ok then
+      return nil, table.concat(argv, " ") .. ": " .. r.stderr:gsub("%s+$", "")
     end
   end
 
-  os.remove(index)
   return (r.stdout:gsub("%s+$", ""))
 end
 
-local function finish(code)
+-- A close_err skips the final snapshot, since a reviewer whose pane would not close may still run.
+local function finish(code, close_err)
   local list = {}
 
-  for _, id in ipairs(order) do
-    local r = results[id]
+  for _, r in ipairs(reviewers) do
     list[#list + 1] = {
       role = r.role,
-      block_id = id,
-      state = r.state or "running",
+      block_id = r.block_id,
+      state = r.state,
       exit_code = r.exit_code,
       msg = r.msg,
       report = r.report,
       complete = complete(r.report),
+      open = r.open,
     }
   end
 
-  local after, err = snapshot()
-  local snap = { before = before, after = after, error = err }
-  if after ~= nil then
-    snap.changed = after ~= before
+  local snap = { before = before, error = close_err }
+  if close_err == nil then
+    snap.after, snap.error = snapshot()
+  end
+  if snap.after ~= nil then
+    snap.changed = snap.after ~= before
+  else
+    code = 1
   end
 
-  print(rex.json.encode{ window_id = window_id, snapshot = snap, reviewers = list })
+  os.remove(index)
+  print(rex.json.encode{ snapshot = snap, reviewers = list })
   rex.stop(code)
 end
 
 local function ended(id, state, exit_code, msg)
-  local r = results[id]
+  local r = by_block[id]
   if r == nil or r.state ~= nil then
     return
   end
 
-  r.state, r.exit_code, r.msg = state, exit_code, msg
+  r.state, r.exit_code, r.msg = stopping and "stopped" or state, exit_code, msg
   pending = pending - 1
 
   if pending == 0 then
-    finish(0)
+    finish(stopping and 2 or 0)
   end
 end
 
@@ -135,8 +148,47 @@ rex.on("terminal.child_exited", function(ctx, ev)
 end)
 
 rex.on("block_closed", function(ctx, ev)
+  local r = by_block[ev.block_id]
+  if r ~= nil then
+    r.open = false
+  end
   ended(ev.block_id, "closed")
 end)
+
+-- Ctrl-C through the terminal, as a user would press it, so the pane keeps the reviewer's last output.
+-- A reviewer that ignores it has its pane closed after the grace. The final snapshot waits until every reviewer has ended.
+local function stop()
+  stopping = true
+
+  for _, r in ipairs(reviewers) do
+    if r.state == nil then
+      -- A failed write leaves the reviewer to the close below.
+      rex.block.call(terminal, "write", { block_id = r.block_id, data = "\3" })
+    end
+  end
+
+  rex.after(grace, function()
+    local errs = {}
+
+    for _, r in ipairs(reviewers) do
+      if r.state == nil then
+        -- rex.call never fills in session_id, and block.close requires one.
+        local _, err = rex.call("block.close", { session_id = rex.session_id, block_id = r.block_id })
+        -- A block someone else closed meanwhile fails with not_found, and counts as closed.
+        if err == nil or tostring(err):find("not_found", 1, true) then
+          r.open = false
+          ended(r.block_id, "stopped")
+        else
+          errs[#errs + 1] = "block.close " .. r.block_id .. ": " .. tostring(err)
+        end
+      end
+    end
+
+    if #errs > 0 then
+      finish(1, table.concat(errs, "; "))
+    end
+  end)
+end
 
 local function pane(r)
   local command = r.command
@@ -166,7 +218,22 @@ local function row(i)
   return rex.layout.horizontal(1 / (#reviewers - i + 1), pane(reviewers[i]), row(i + 1))
 end
 
--- The handlers are registered before this timer opens the window, so they hear a reviewer that exits at once.
+-- A new tab with window set, else a split below the block the script runs against.
+local function open()
+  if args.window ~= nil then
+    return rex.session.new_window{ window_label = args.window, focus = false, layout = row(1) }
+  end
+
+  return rex.session.new_split{
+    anchor_id = rex.block_id,
+    direction = "vertical",
+    side = "after",
+    focus = false,
+    layout = row(1),
+  }
+end
+
+-- The handlers are registered before this timer opens the panes, so they hear a reviewer that exits at once.
 rex.after(0, function()
   for _, r in ipairs(reviewers) do
     os.remove(r.report)
@@ -179,25 +246,24 @@ rex.after(0, function()
   end
 
   local w
-  w, err = rex.session.new_window{ window_label = args.window, focus = false, layout = row(1) }
+  w, err = open()
   if err ~= nil then
     fail(err, 1)
   end
 
-  window_id = w.window_id
   local blocks = {}
 
   for i, id in ipairs(w.block_ids) do
     local r = reviewers[i]
-    results[id] = { role = r.role, report = r.report }
-    order[i] = id
+    r.block_id = id
+    r.open = true
+    by_block[id] = r
     blocks[r.role] = id
-    pending = pending + 1
   end
+  pending = #w.block_ids
 
-  print(rex.json.encode{ window_id = window_id, blocks = blocks })
-end)
+  print(rex.json.encode{ blocks = blocks })
 
-rex.after(limit, function()
-  finish(2)
+  -- The limit counts from the panes' start, so a slow first snapshot never eats into it.
+  rex.after(limit, stop)
 end)

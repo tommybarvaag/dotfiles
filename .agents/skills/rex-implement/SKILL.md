@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Rex: implement
 
-You are the **orchestrator**. You turn the input into logical PRs, write a **ticket** per change, and hand it to the **executor**, a Claude Code subagent. You vet every diff yourself, run each PR through review **rounds**, and commit, push and open the PRs. A round opens a fresh Rex tab with one pane per **reviewer**, and each reviewer runs once, writes its report and exits. You write only the run docs, tickets, briefs, verdicts, commits and PR text. Every line of code comes from the executor.
+You are the **orchestrator**. You turn the input into logical PRs, write a **ticket** per change, and hand it to the **executor**, a Claude Code subagent. You vet every diff yourself, run each PR through review **rounds**, and commit, push and open the PRs. A round starts one fresh **reviewer** process per role, and each reviewer runs once, writes its report and exits. You write only the run docs, tickets, briefs, verdicts, commits and PR text. Every line of code comes from the executor.
 
 The input is the argument: a goal sentence, a spec, a markdown plan, a ticket or an issue link. Read all of it before planning.
 
@@ -88,7 +88,7 @@ Done when every answer is in `DECISIONS.md`, each role's model and effort is in 
 
 ## 5. Loop, once per PR
 
-In worktrees mode, each lane runs this loop with its own executor, and rounds for different lanes may run at once, each in its own tab.
+In worktrees mode, each lane runs this loop with its own executor, and rounds for different lanes may run at once.
 
 1. **Branch.** Cut the branch from a fresh `origin/<base>`, or from the committed PR it stacks on.
 2. **Ticket.** Write `PR<n>-T1.md` from [prompts.md](references/prompts.md#ticket). Keep the next PR's ticket written ahead while the executor works.
@@ -99,7 +99,7 @@ In worktrees mode, each lane runs this loop with its own executor, and rounds fo
    - Run the round in the background per [rex-ops.md](references/rex-ops.md#rounds). The script takes a **snapshot** of the worktree before the panes start and after the last reviewer ends.
    - When it exits, read every complete report, and rerun any incomplete reviewer per the same section.
    - A changed snapshot means a reviewer edited the worktree. Log both hashes, show the user `git diff --stat <before> <after>`, and ask whether to revert the edit (recommended) or keep it for the next round. `git diff --binary <after> <before> | git apply` reverts it.
-   - Close the round's tab ([rex-ops.md](references/rex-ops.md#teardown)).
+   - Close the round's panes ([rex-ops.md](references/rex-ops.md#teardown)).
 6. **Verdicts.** Synthesize the reports into `PR<n>-R<k>.md`:
    - one root cause is one finding, listing every role that raised it. Two roles raising it is strong evidence;
    - settle disagreements between roles by reading the code, and note why;
@@ -109,8 +109,8 @@ In worktrees mode, each lane runs this loop with its own executor, and rounds fo
    - *accept*: a real issue. A blocking or should-fix finding becomes an **open finding**; a cheap in-scope nit joins the next ticket.
    - *reject*: wrong, out of scope, or against a logged decision.
    - *defer*: real but outside this PR. It goes where step 4.4 says.
-7. **Exit check.** With no open findings and your verify green, go to step 8. With open findings and k below the bugs and quality cap, write the fix ticket `PR<n>-T<k+1>.md` and go to step 3. When the cap is spent with open findings or a red verify, ask the user: another round, carry the findings into the PR description, or stop the PR.
-8. **Commit.** Stage exactly the PR's files and commit with `/git-commit`. When the worktree holds more than one PR's changes, stage by `layers.json`, and stage one hunk of a shared file with `git apply --cached <patch>`, since `git add -p` is interactive. Push nothing yet. A late fix to a lower PR then lands on its branch, and a local rebase carries it into the PRs above with no force-push.
+7. **Exit check.** With no open findings and your verify green, go to step 8. With open findings and k below the bugs and quality cap, write the next ticket and go to step 3. Tickets have their own counter per PR: the next one is `PR<n>-T<t>.md`, where t is one past the PR's last ticket, vet tickets from step 5.4 included, so each ticket gets a fresh report path. The round counter k only names rounds and checks the caps. When the cap is spent with open findings or a red verify, ask the user: another round, carry the findings into the PR description, or stop the PR.
+8. **Commit.** Stage exactly the PR's files and commit with `/git-commit`. When the worktree holds more than one PR's changes, stage by `layers.json`, and stage one hunk of a shared file with `git apply --cached <patch>`, since `git add -p` is interactive. Push nothing yet. A late fix to a lower PR then lands on its branch, and one rebase carries it into every PR above with no force-push: on the top branch, `git rebase --update-refs <fixed branch>`, or `gh stack rebase --upstack` on the fixed branch with `gh stack`. Check the stack as step 6.1 does.
 
 Done, per PR, when it is committed locally and `RUN-LOG.md` holds every round and verdict.
 
@@ -118,7 +118,7 @@ Done, per PR, when it is committed locally and `RUN-LOG.md` holds every round an
 
 Start once every PR is committed.
 
-1. `git fetch`. When `origin/<base>` moved, rebase the PRs onto it, bottom first, and re-run the verify block. A red result goes to the user.
+1. `git fetch`. When `origin/<base>` moved, rebase each stack onto it in one pass from its top branch, so each lower branch stays an ancestor of the one above: `git rebase --update-refs origin/<base>` moves every branch below the top to the rewritten commits. With `gh stack`, `gh stack rebase` does the same for the whole stack. Check every adjacent pair with `git merge-base --is-ancestor <lower> <upper>`, then re-run the verify block. A failed check or a red result goes to the user.
 2. Push every branch.
 3. With automatic PRs agreed, draft each title and body with `/git-pr-summary` and create the PR with the forge CLI, based on the branch below for a stacked PR. List each finding carried over in an "Open review findings" section.
 4. For a stack with `gh stack`, follow the `gh-stack` skill and check that every layer links to its PR. `gh stack sync` rebases and force-pushes every layer when the trunk moved since your last fetch, so fetch and compare first, and ask before a sync that would rewrite branches.

@@ -3,9 +3,9 @@
 | Role | Runs as | Pass skill | Writes code | Rounds per PR |
 |---|---|---|---|---|
 | `executor` | a Claude Code subagent, one per PR | the skills its ticket names | yes | until its tickets are done |
-| `bugs` | a one-shot reviewer in the round's tab | `/thermo-nuclear-review`, `~/.agents/skills/thermo-nuclear-review/SKILL.md` | no | at most 3 |
-| `quality` | a one-shot reviewer in the round's tab | `/thermo-nuclear-code-quality-review`, `~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md` | no | at most 3 |
-| `simplify` | a one-shot reviewer in the round's tab, Claude Code only | `/simplify`, bundled with Claude Code, findings only | no | at most 2 |
+| `bugs` | a one-shot reviewer | `/thermo-nuclear-review`, `~/.agents/skills/thermo-nuclear-review/SKILL.md` | no | at most 3 |
+| `quality` | a one-shot reviewer | `/thermo-nuclear-code-quality-review`, `~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md` | no | at most 3 |
+| `simplify` | a one-shot reviewer, Claude Code only | `/simplify`, bundled with Claude Code, findings only | no | at most 2 |
 
 The caps are the owner's defaults from 2026-10-20, the same caps they set mid-run on #357. The setup round still asks for them, since the owner has changed caps mid-run before.
 
