@@ -71,12 +71,14 @@ if (( $+commands[fnm] )); then
     chpwd_functions=(${chpwd_functions:#_fnm_lazy})
     unfunction fnm _fnm_init _fnm_lazy
     path=(${path:#${(b)FNM_DIR}/aliases/default/bin})
-    eval "$(command fnm env --use-on-cd --shell zsh)"
+    # Run from / so fnm env doesn't switch Node itself and announce it (only
+    # quiet hides that); _fnm_lazy does the switch at the level it's given.
+    eval "$(builtin cd -q / && command fnm env --use-on-cd --shell zsh)"
   }
   _fnm_lazy() {
     [[ -f .node-version || -f .nvmrc || -f package.json ]] || return 0
     _fnm_init
-    _fnm_autoload_hook
+    command fnm --log-level=${1:-info} use --silent-if-unchanged
   }
   fnm() {
     _fnm_init
@@ -84,7 +86,8 @@ if (( $+commands[fnm] )); then
   }
 
   chpwd_functions+=(_fnm_lazy)
-  _fnm_lazy
+  # p10k's instant prompt flags any output during startup; keep errors only.
+  _fnm_lazy error
 fi
 
 source "$DOTFILES/shell/aliases.zsh"
