@@ -388,6 +388,16 @@
       "skillFolderHash": "bf90d0a4b83ea054653350f9c67f6de235d3a368",
       "installedAt": "2026-10-08T18:20:02.751Z",
       "updatedAt": "2026-10-08T18:20:02.751Z"
+    },
+    "retro": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/mattpocock/skills.git",
+      "skillPath": "skills/engineering/retro/SKILL.md",
+      "skillFolderHash": "335c1862a43da9d629abafdb79ca0c0de118be08",
+      "pluginName": "mattpocock-skills",
+      "installedAt": "2026-10-24T06:18:16.512Z",
+      "updatedAt": "2026-10-24T06:18:16.512Z"
     }
   },
   "dismissed": {
@@ -399,6 +409,7 @@
     "codex",
     "cursor",
     "droid",
+    "fx",
     "gemini-cli",
     "github-copilot",
     "kilo",
