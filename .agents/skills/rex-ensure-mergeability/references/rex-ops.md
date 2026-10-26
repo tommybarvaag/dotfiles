@@ -2,7 +2,7 @@
 
 `rex skill show` and `rex <command> --help` are the authority for commands and flags. This file holds only what they leave out: how Claude Code and Codex behave inside Rex, and the patterns the loop relies on. Pass `-s "$REX_SESSION"` on every command, and `-b <block>` on every command that acts on an agent: without `-b`, Rex picks `$REX_BLOCK`, your own pane.
 
-This file and `turn.lua` are this skill's own. `/rex-implement` shares neither, because it runs one-shot reviewers through its own `scripts/review.lua` and keeps no agent in a pane.
+This file is this skill's own. `/rex-implement` keeps a copy of `turn.lua` for its executor pane, so change both copies together.
 
 ## Addressing agents
 
@@ -96,7 +96,7 @@ Send one `escape`, read the pane, and send a second only while the turn is still
 
 ## Teardown
 
-On the user's word, submit `/exit` to a Claude Code agent's block or `/quit` to a Codex agent's block, read the pane for the exit, then `rex block close -s "$REX_SESSION" <block>`. `--keep-open` holds the pane after the CLI exits, so the close is what removes it. Close only the blocks you started.
+On the user's word, submit `/exit` to a Claude Code agent's block or `/quit` to a Codex agent's block, read the pane for the exit, then `rex block close -s "$REX_SESSION" <block>`. `--keep-open` holds the pane after the CLI exits, so the close is what removes it. Close only the blocks you started. A helper's pane closes the same way once you have read its reply, without waiting for the user's word.
 
 ## Shell
 

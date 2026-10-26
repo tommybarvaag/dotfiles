@@ -2,23 +2,23 @@
 
 | Role | Runs as | Pass skill | Writes code | Rounds per PR |
 |---|---|---|---|---|
-| `executor` | a Claude Code subagent, one per PR | the skills its ticket names | yes | until its tickets are done |
-| `bugs` | a one-shot reviewer | `/thermo-nuclear-review`, `~/.agents/skills/thermo-nuclear-review/SKILL.md` | no | at most 3 |
-| `quality` | a one-shot reviewer | `/thermo-nuclear-code-quality-review`, `~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md` | no | at most 3 |
-| `simplify` | a one-shot reviewer, Claude Code only | `/simplify`, bundled with Claude Code, findings only | no | at most 2 |
+| `executor` | an interactive CLI in its own pane, one per PR | the skills its ticket names | yes | until its tickets are done |
+| `bugs` | a one-shot pane per round | `/thermo-nuclear-review`, `~/.agents/skills/thermo-nuclear-review/SKILL.md` | no | at most 3 |
+| `quality` | a one-shot pane per round | `/thermo-nuclear-code-quality-review`, `~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md` | no | at most 3 |
+| `simplify` | a one-shot pane per round, Claude Code only | `/simplify`, bundled with Claude Code, findings only | no | at most 2 |
 
 The caps are the owner's defaults from 2026-10-20, the same caps they set mid-run on #357. The setup round still asks for them, since the owner has changed caps mid-run before.
 
 Why each role runs where it does:
 
-- **The executor is a subagent.** `SendMessage` hands each fix ticket to the agent that wrote the code, so it keeps that context, and its hand-back notification ends each turn. The data-table-filter run on 2026-10-20 and the T3 runs on PR #270 and #356 used this shape with no plumbing failure. The user can't watch a subagent in a pane, so its report file and the diff are the record.
+- **The executor is a long-lived pane.** Each fix ticket for a PR goes to the agent that wrote the code, so it keeps that context, and `turn.lua` reports when each turn settles. Its start command sets the role's model and effort, and the user can watch it work. A native subagent ignores both: it runs at the orchestrator's effort, out of the user's sight, as the executors on PR #393 did.
 - **Reviewers are one-shot.** A new process per round starts from a fresh context, so no reset step can swallow the next prompt. The process exit is the completion signal, and the CLI writes the report itself, which a read-only sandbox allows. A follow-up is a new run. The data-table-filter run used this shape for two rounds with no failure.
 
 ## Choosing models and effort
 
 Build the options from the installed CLIs:
 
-- Claude Code: the model aliases in `claude --help` under `--model`, and the levels under `--effort`. The executor offers only the aliases the `Agent` tool's `model` parameter accepts.
+- Claude Code: the model aliases in `claude --help` under `--model`, and the levels under `--effort`.
 - Codex: `codex debug models` prints the model catalog as JSON. Offer the entries whose `visibility` is `list`, judge capability by their `description`, and offer each model only its own `supported_reasoning_levels`.
 
 Ask in two `AskUserQuestion` calls with one question per role, models first and then efforts for the chosen models. A question holds at most four options, so put the recommendation first and the nearest alternatives after it, with at least one from the other CLI where the role offers both. The tool adds "Other" for anything else the CLI accepts.
@@ -32,16 +32,18 @@ Recommend from the evidence below, mapped onto what the catalogs list today. Whe
 | `quality` | Codex `gpt-6.1-sol`, xhigh | Same as `bugs`. |
 | `simplify` | `opus`, xhigh | Used on #287, #356, #357 and the video runs. Simplify raised most findings on the second #322 run and on #356. |
 
-## Executor call
+## Executor start command
 
-Start each PR's executor with the `Agent` tool:
+The executor's pane runs one of these as its command ([rex-ops.md](rex-ops.md#executor)), with the absolute CLI paths you logged at preflight:
 
-- `subagent_type`: `general-purpose`, which has the `Skill` tool to load the ticket's skills;
-- `model` and `effort`: the chosen ones;
-- `description`: `Executor PR<n>`;
-- `prompt`: `Implement <absolute ticket path>.`
+- Claude Code: `<claude path> --model <model> --effort <level> --permission-mode auto --add-dir <run dir>`
+- Codex: `<codex path> -m <model> -c 'model_reasoning_effort="<level>"' -a never -s workspace-write --add-dir <run dir> --no-alt-screen`
 
-Log the agent ID it returns. Send each fix ticket for that PR with `SendMessage` to that ID: `Implement <absolute ticket path>.`
+Why these flags:
+
+- **No approval prompts.** `--permission-mode auto` and `-a never` keep an approval prompt from stopping the run while nobody watches. Under `-a never`, a blocked command fails back to the model. When a permission classifier refuses `-a never`, recommend a Claude Code executor, since a Codex executor without it stops at every approval.
+- **Run directory access.** `--add-dir` lets the executor read its tickets and write its report in the run directory, outside the worktree.
+- **Codex in the main screen.** `--no-alt-screen` keeps Codex's replies in the scrollback, where a pane read finds them.
 
 ## Reviewer commands
 
@@ -62,7 +64,7 @@ Claude Code, for `simplify`, and for `bugs` or `quality` when the user picks a C
  "--disallowedTools", "Edit,Write,NotebookEdit", "--add-dir", "<run dir>"]
 ```
 
-Before the first round, confirm each flag in `codex exec --help` and `claude --help`. When a flag is renamed or gone, use the flag the help now gives for the same capability, and log the substitution in `RUN-LOG.md`. `model_reasoning_effort` is a config key, so the Codex help shows only the generic `-c key=value`.
+Before the first executor and the first round, confirm each flag in `codex --help`, `codex exec --help` and `claude --help`. When a flag is renamed or gone, use the flag the help now gives for the same capability, and log the substitution in `RUN-LOG.md`. `model_reasoning_effort` is a config key, so the Codex help shows only the generic `-c key=value`.
 
 Why these arguments:
 

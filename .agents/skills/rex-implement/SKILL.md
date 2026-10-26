@@ -1,19 +1,25 @@
 ---
 name: rex-implement
-description: Implement a goal, spec or markdown plan from a Rex terminal, with a subagent executor and fresh reviewer panes each round, ending in reviewed PRs.
+description: Implement a goal, spec or markdown plan from a Rex terminal, with an executor pane per PR and fresh reviewer panes each round, ending in reviewed PRs.
 disable-model-invocation: true
 ---
 
 # Rex: implement
 
-You are the **orchestrator**. You turn the input into logical PRs, write a **ticket** per change, and hand it to the **executor**, a Claude Code subagent. You vet every diff yourself, run each PR through review **rounds**, and commit, push and open the PRs. A round starts one fresh **reviewer** process per role, and each reviewer runs once, writes its report and exits. You write only the run docs, tickets, briefs, verdicts, commits and PR text. Every line of code comes from the executor.
+You are the **orchestrator**. You turn the input into logical PRs, write a **ticket** per change, and hand it to the **executor**, a CLI agent in its own pane. You vet every diff yourself, run each PR through review **rounds**, and commit, push and open the PRs. A round starts one fresh **reviewer** process per role, and each reviewer runs once, writes its report and exits. You write only the run docs, tickets, briefs, verdicts, commits and PR text. Every line of code comes from the executor.
 
 The input is the argument: a goal sentence, a spec, a markdown plan, a ticket or an issue link. Read all of it before planning.
 
 References:
-- [roles.md](references/roles.md): the roles and their caps, choosing models and effort, the executor call, the reviewer commands.
-- [rex-ops.md](references/rex-ops.md): command shape, running a round with `scripts/review.lua`, reading, the probe, teardown.
+- [roles.md](references/roles.md): the roles and their caps, choosing models and effort, the executor's start command, the reviewer commands.
+- [rex-ops.md](references/rex-ops.md): command shape, the executor's pane with `scripts/turn.lua`, running a round with `scripts/review.lua`, helpers, reading, the probe, teardown.
 - [prompts.md](references/prompts.md): ticket, executor contract, review brief.
+
+## Agents run in panes
+
+Every agent you start runs in a fresh Rex **pane** in your session: the executor, each reviewer, and any helper for research or a probe. Its pane runs the role's own CLI command at the model and effort chosen for that role ([roles.md](references/roles.md)), and the user can watch, read and stop it there.
+
+Never start an agent with the `Agent` tool or any other native subagent, and never hand one work with `SendMessage`. A native subagent inherits your own effort, so the role's chosen effort never applies, and it runs where the user can't watch it. On PR #393 (2026-10-23) the executors ran as native subagents at the orchestrator's effort, not the effort the run log named.
 
 ## Decisions and the AFK rule
 
@@ -34,7 +40,7 @@ When the user says they are gone for the session, take the recommended option at
 
 1. Before the first other `rex` command, read the guide for the installed Rex: `rex skill show`. This skill is not that guide, and the guide comes from the binary, so it matches the installed commands.
 2. Confirm you run inside a Rex terminal: `rex whoami --json` reports the session and block that `$REX_SESSION` and `$REX_BLOCK` name. Log both IDs, and pass them as literals from then on ([rex-ops.md](references/rex-ops.md#command-shape)).
-3. Confirm your dependencies: the Claude Code tools `AskUserQuestion`, `Agent`, `SendMessage` and `ListAgents`, `/git-commit`, `/git-pr-summary`, `~/.agents/skills/show-me/SKILL.md`, `jq`, and the pass skills' `SKILL.md` paths in [roles.md](references/roles.md). Log the absolute paths `command -v codex` and `command -v claude` print. Ask the user about anything missing.
+3. Confirm your dependencies: the Claude Code tool `AskUserQuestion`, `/git-commit`, `/git-pr-summary`, `~/.agents/skills/show-me/SKILL.md`, `jq`, and the pass skills' `SKILL.md` paths in [roles.md](references/roles.md). Log the absolute paths `command -v codex` and `command -v claude` print. Ask the user about anything missing.
 4. Create the run directory in the OS temp directory, outside the repo: `mktemp -d "${TMPDIR:-/tmp}/rex-implement.XXXXXX"`. It holds `RUN-LOG.md` with the PR plan, lanes, agents, rounds and verdicts, `DECISIONS.md` with every decision and its evidence, and every ticket, brief, spec and report, each addressed by absolute path.
 
 Done when the Rex guide is read, your IDs and CLI paths are logged, every dependency is confirmed, and the run directory holds `RUN-LOG.md` and `DECISIONS.md`.
@@ -92,7 +98,7 @@ In worktrees mode, each lane runs this loop with its own executor, and rounds fo
 
 1. **Branch.** Cut the branch from a fresh `origin/<base>`, or from the committed PR it stacks on.
 2. **Ticket.** Write `PR<n>-T1.md` from [prompts.md](references/prompts.md#ticket). Keep the next PR's ticket written ahead while the executor works.
-3. **Execute.** Start a new executor for the PR per [roles.md](references/roles.md#executor-call) with `Implement <absolute ticket path>.`, and log its agent ID. Send each later ticket for the same PR to that ID with `SendMessage`, so the executor keeps the context of the code it wrote. Its hand-back notification ends a turn, and its report file ends the task. A hand-back without the report file gets `Continue where you left off, then write the report.` Before you tell the user the executor is still working, check `ListAgents`.
+3. **Execute.** Start the PR's executor in a new pane per [rex-ops.md](references/rex-ops.md#executor), log its block ID, and dispatch `Implement <absolute ticket path>.` to it in the background. Dispatch each later ticket for the same PR to that block, so the executor keeps the context of the code it wrote. A settle ends a turn, and the report file ends the task. A settle without the report file gets `Continue where you left off, then write the report.` Before you tell the user the executor is still working, read its status.
 4. **Vet.** Read the report and the full diff, untracked files included, and re-run the verify block yourself under the throttle. A red check other than a known red, drift or scope creep goes back as the next ticket before any round. A STOP report goes to the user as a question about the plan. Answer the report's open questions under the autonomous rule, in the next ticket.
 5. **Round k.** Bugs and quality review while k is within their cap, and simplify while k is within its cap.
    - Write the brief `PR<n>-R<k>-brief.md` from [prompts.md](references/prompts.md#review-brief) and the spec `PR<n>-R<k>-review.json` from [rex-ops.md](references/rex-ops.md#rounds).
@@ -110,7 +116,7 @@ In worktrees mode, each lane runs this loop with its own executor, and rounds fo
    - *reject*: wrong, out of scope, or against a logged decision.
    - *defer*: real but outside this PR. It goes where step 4.4 says.
 7. **Exit check.** With no open findings and your verify green, go to step 8. With open findings and k below the bugs and quality cap, write the next ticket and go to step 3. Tickets have their own counter per PR: the next one is `PR<n>-T<t>.md`, where t is one past the PR's last ticket, vet tickets from step 5.4 included, so each ticket gets a fresh report path. The round counter k only names rounds and checks the caps. When the cap is spent with open findings or a red verify, ask the user: another round, carry the findings into the PR description, or stop the PR.
-8. **Commit.** Stage exactly the PR's files and commit with `/git-commit`. When the worktree holds more than one PR's changes, stage by `layers.json`, and stage one hunk of a shared file with `git apply --cached <patch>`, since `git add -p` is interactive. Push nothing yet. A late fix to a lower PR then lands on its branch, and one rebase carries it into every PR above with no force-push: on the top branch, `git rebase --update-refs <fixed branch>`, or `gh stack rebase --upstack` on the fixed branch with `gh stack`. Check the stack as step 6.1 does.
+8. **Commit.** Stage exactly the PR's files and commit with `/git-commit`. When the worktree holds more than one PR's changes, stage by `layers.json`, and stage one hunk of a shared file with `git apply --cached <patch>`, since `git add -p` is interactive. Push nothing yet. A late fix to a lower PR then lands on its branch, and one rebase carries it into every PR above with no force-push: on the top branch, `git rebase --update-refs <fixed branch>`, or `gh stack rebase --upstack` on the fixed branch with `gh stack`. Check the stack as step 6.1 does. Then close the PR's executor pane ([rex-ops.md](references/rex-ops.md#teardown)).
 
 Done, per PR, when it is committed locally and `RUN-LOG.md` holds every round and verdict.
 
@@ -128,6 +134,6 @@ Done when every branch is pushed, and every PR is open or its branch reported.
 
 ## 7. Finish
 
-Report, per PR: URL or branch, what it stacks on, rounds used per role, findings fixed with the roles that raised them, findings rejected and deferred with their reasons, and findings carried over. Then list every autonomous and `auto-decided (AFK)` decision, the merge order, the run directory and the executors' agent IDs.
+Report, per PR: URL or branch, what it stacks on, rounds used per role, findings fixed with the roles that raised them, findings rejected and deferred with their reasons, and findings carried over. Then list every autonomous and `auto-decided (AFK)` decision, the merge order, the run directory and the block IDs of every pane still open.
 
 Show the result of the work the way `~/.agents/skills/show-me/SKILL.md` says, then end with what still needs the user.

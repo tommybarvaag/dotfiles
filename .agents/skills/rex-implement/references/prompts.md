@@ -6,7 +6,7 @@
 
 - the worktree path, the branch and what it stacks on;
 - the absolute report path `<run-dir>/PR<n>-T<t>-report.md`;
-- the skills to load before writing code, with the `SKILL.md` path of each user-invoked one, since a subagent can load only model-invoked skills by name;
+- the skills to load before writing code, with the `SKILL.md` path of each user-invoked one, since the executor can load only model-invoked skills by name;
 - **why**: the concern, in two or three sentences, and the logged decisions that apply;
 - **steps**, each ending on a checkable completion condition. Where behaviour changes, the first step writes the test that proves it and records it failing for the stated reason;
 - **scope**: the files and concerns in, and those out;

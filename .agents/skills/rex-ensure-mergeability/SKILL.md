@@ -19,6 +19,12 @@ References:
 - [rex-ops.md](references/rex-ops.md): addressing agents, status, starting, fresh context, pass skills, dispatch and wait, read, blocked agents, interrupting, teardown, shell aliases.
 - [prompts.md](references/prompts.md): review prompt, ticket, executor contract.
 
+## Agents run in panes
+
+Every agent you start runs in a fresh Rex **pane** in your session: the executor, the three reviewers, and any helper for research or a probe. Start each one per [rex-ops.md](references/rex-ops.md#starting) with its role's model and effort, so the user can watch, read and stop it there. A helper starts like a reviewer, gets its prompt file through `turn.lua`, and closes once you have read its reply ([rex-ops.md](references/rex-ops.md#teardown)).
+
+Never start an agent with the `Agent` tool or any other native subagent, and never hand one work with `SendMessage`. A native subagent inherits your own effort, so the role's chosen effort never applies, and it runs where the user can't watch it.
+
 ## Decisions and the AFK rule
 
 Every question for the user goes through `AskUserQuestion`, recommended option first and labelled "(Recommended)". Ground each recommendation in the code, the repo's instructions, a tool's `--help` or the run evidence in [roles.md](references/roles.md#choosing-models-and-effort), and name that evidence in the option's description. An option you could not ground is offered without the label.
