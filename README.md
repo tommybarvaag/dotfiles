@@ -24,7 +24,7 @@ git clone git@github.com:tommybarvaag/dotfiles.git ~/.dotfiles
 ~/.dotfiles/install.sh
 ```
 
-This also manages `~/.agents` by symlinking it to `~/.dotfiles/.agents`.
+This also manages `~/.agents` by symlinking it to `~/.dotfiles/.agents`, and links each skill and command into `~/.claude/skills` and `~/.claude/commands` so Claude Code picks them up. Re-run the installer after adding a skill.
 
 4. Restart the terminal.
 5. Restore `~/.config/dotfiles/.env` and `~/.gitconfig.local` if you use them.

@@ -102,6 +102,36 @@ link_file() {
   ln -s "$source" "$target"
 }
 
+# Link each entry of a dotfiles folder into a folder we don't own outright,
+# such as ~/.claude/skills, which also holds Claude-managed content (synced/).
+link_entries() {
+  local source_dir="$1"
+  local target_dir="$2"
+  local entry target
+
+  mkdir -p "$target_dir"
+
+  # Drop links to entries that were removed from the dotfiles.
+  for target in "$target_dir"/*; do
+    if [[ -L "$target" && ! -e "$target" && "$(readlink "$target")" == *"/.agents/"* ]]; then
+      rm "$target"
+      printf 'Removed stale link %s\n' "$target"
+    fi
+  done
+
+  for entry in "$source_dir"/*; do
+    [[ -e "$entry" ]] || continue
+    target="$target_dir/$(basename "$entry")"
+
+    # An existing link is ours to replace; a real folder gets backed up.
+    if [[ -L "$target" && "$(readlink "$target")" != "$entry" ]]; then
+      rm "$target"
+    fi
+
+    link_file "$entry" "$target"
+  done
+}
+
 ensure_local_env() {
   mkdir -p "$LOCAL_CONFIG_DIR"
   chmod 700 "$LOCAL_CONFIG_DIR"
@@ -241,6 +271,8 @@ main() {
   link_file "$DOTFILES/git/.gitconfig" "$HOME/.gitconfig"
   link_file "$DOTFILES/git/.gitignore_global" "$HOME/.gitignore_global"
   link_file "$DOTFILES/.agents" "$HOME/.agents"
+  link_entries "$DOTFILES/.agents/skills" "$HOME/.claude/skills"
+  link_entries "$DOTFILES/.agents/commands" "$HOME/.claude/commands"
   link_file "$DOTFILES/config/ghostty/config" "$HOME/.config/ghostty/config"
   link_file "$DOTFILES/config/nvim" "$HOME/.config/nvim"
 
