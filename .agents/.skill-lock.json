@@ -326,6 +326,15 @@
       "skillFolderHash": "92857a8f6dbc0c3f5157c11a7afc4e55d488b8d6",
       "installedAt": "2026-11-01T13:05:50.059Z",
       "updatedAt": "2026-11-12T07:13:13.078Z"
+    },
+    "break-ui": {
+      "source": "emilkowalski/skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/emilkowalski/skills.git",
+      "skillPath": "skills/break-ui/SKILL.md",
+      "skillFolderHash": "f2a3441d4cf14df060ee363e155502a4818b5f8d",
+      "installedAt": "2026-11-12T08:10:40.037Z",
+      "updatedAt": "2026-11-12T08:10:40.037Z"
     }
   },
   "dismissed": {
