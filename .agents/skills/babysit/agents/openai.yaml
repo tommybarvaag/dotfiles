@@ -1,0 +1,3 @@
+interface:
+  display_name: "Babysit"
+  short_description: "Watch a PR until it merges or closes"

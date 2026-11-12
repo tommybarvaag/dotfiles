@@ -1,0 +1,395 @@
+{
+  "continuation_token": null,
+  "count": 7,
+  "value": [
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "sys-guid",
+            "displayName": "Microsoft.VisualStudio.Services.TFS",
+            "uniqueName": "",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/sys-guid",
+            "imageUrl": null,
+            "descriptor": "s2s.c3lzLWd1aWQ"
+          },
+          "commentType": "system",
+          "content": "Ada Reviewer voted -5",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 10,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "CodeReviewThreadType": {
+          "$type": "System.String",
+          "$value": "VoteUpdate"
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": null,
+      "threadContext": null
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "ada-guid",
+            "displayName": "Ada Reviewer",
+            "uniqueName": "ada@acme.test",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/ada-guid",
+            "imageUrl": null,
+            "descriptor": "aad.YWRhLWd1aWQ"
+          },
+          "commentType": "text",
+          "content": "This cache never evicts; add a TTL.",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 11,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": "active",
+      "threadContext": {
+        "filePath": "/src/cache.ts",
+        "leftFileEnd": null,
+        "leftFileStart": null,
+        "rightFileEnd": {
+          "line": 12,
+          "offset": 40
+        },
+        "rightFileStart": {
+          "line": 12,
+          "offset": 1
+        }
+      }
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "ada-guid",
+            "displayName": "Ada Reviewer",
+            "uniqueName": "ada@acme.test",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/ada-guid",
+            "imageUrl": null,
+            "descriptor": "aad.YWRhLWd1aWQ"
+          },
+          "commentType": "text",
+          "content": "Typo in the comment.",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 12,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": "fixed",
+      "threadContext": {
+        "filePath": "/src/cache.ts",
+        "leftFileEnd": null,
+        "leftFileStart": null,
+        "rightFileEnd": {
+          "line": 30,
+          "offset": 40
+        },
+        "rightFileStart": {
+          "line": 30,
+          "offset": 1
+        }
+      }
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "ada-guid",
+            "displayName": "Ada Reviewer",
+            "uniqueName": "ada@acme.test",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/ada-guid",
+            "imageUrl": null,
+            "descriptor": "aad.YWRhLWd1aWQ"
+          },
+          "commentType": "text",
+          "content": "Null check missing before render().",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        },
+        {
+          "_links": null,
+          "author": {
+            "id": "op-guid",
+            "displayName": "Octo Operator",
+            "uniqueName": "operator@acme.test",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/op-guid",
+            "imageUrl": null,
+            "descriptor": "aad.b3AtZ3VpZA"
+          },
+          "commentType": "text",
+          "content": "[babysit] Added the null check in 2222222.",
+          "id": 2,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 1,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 13,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": "active",
+      "threadContext": {
+        "filePath": "/src/widget.ts",
+        "leftFileEnd": null,
+        "leftFileStart": null,
+        "rightFileEnd": {
+          "line": 7,
+          "offset": 40
+        },
+        "rightFileStart": {
+          "line": 7,
+          "offset": 1
+        }
+      }
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "svc-guid",
+            "displayName": "Project Collection Build Service (acme)",
+            "uniqueName": "Build\\svc-guid",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/svc-guid",
+            "imageUrl": null,
+            "descriptor": "svc.c3ZjLWd1aWQ"
+          },
+          "commentType": "text",
+          "content": "Static analysis found 3 new code smells.",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 14,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": "active",
+      "threadContext": null
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "bob-guid",
+            "displayName": "Bob Builder",
+            "uniqueName": "bob@acme.test",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/bob-guid",
+            "imageUrl": null,
+            "descriptor": "msa.Ym9iLWd1aWQ"
+          },
+          "commentType": "text",
+          "content": "Should this ship behind a flag?",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 15,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": null,
+      "threadContext": null
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "bob-guid",
+            "displayName": "Bob Builder",
+            "uniqueName": "bob@acme.test",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/bob-guid",
+            "imageUrl": null,
+            "descriptor": "msa.Ym9iLWd1aWQ"
+          },
+          "commentType": "text",
+          "content": "Never mind",
+          "id": 1,
+          "isDeleted": true,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 16,
+      "identities": null,
+      "isDeleted": true,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": "active",
+      "threadContext": null
+    },
+    {
+      "_links": null,
+      "comments": [
+        {
+          "_links": null,
+          "author": {
+            "id": "sp-guid",
+            "displayName": "SonarQube",
+            "uniqueName": "",
+            "isContainer": null,
+            "url": "https://spsprodweu2.vssps.visualstudio.com/_apis/Identities/sp-guid",
+            "imageUrl": null,
+            "descriptor": "aadsp.c3AtZ3VpZA"
+          },
+          "commentType": "text",
+          "content": "Cognitive complexity of this method is 31.",
+          "id": 1,
+          "isDeleted": false,
+          "lastContentUpdatedDate": "2026-10-08T09:00:00Z",
+          "lastUpdatedDate": "2026-10-08T09:00:00Z",
+          "parentCommentId": 0,
+          "publishedDate": "2026-10-08T09:00:00Z",
+          "usersLiked": []
+        }
+      ],
+      "id": 17,
+      "identities": null,
+      "isDeleted": false,
+      "lastUpdatedDate": "2026-10-08T09:00:00Z",
+      "properties": {
+        "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+          "$type": "System.Int32",
+          "$value": 1
+        }
+      },
+      "publishedDate": "2026-10-08T09:00:00Z",
+      "pullRequestThreadContext": null,
+      "status": "active",
+      "threadContext": {
+        "filePath": "/src/cache.ts",
+        "leftFileEnd": null,
+        "leftFileStart": null,
+        "rightFileEnd": {
+          "line": 40,
+          "offset": 40
+        },
+        "rightFileStart": {
+          "line": 40,
+          "offset": 1
+        }
+      }
+    }
+  ]
+}
