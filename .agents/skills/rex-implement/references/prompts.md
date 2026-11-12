@@ -8,7 +8,7 @@
 - the absolute report path `<run-dir>/PR<n>-T<t>-report.md`;
 - the skills to load before writing code, with the `SKILL.md` path of each user-invoked one, since the executor can load only model-invoked skills by name;
 - **why**: the concern, in two or three sentences, and the logged decisions that apply;
-- **steps**, each ending on a checkable completion condition. Where behaviour changes, the first step writes the test that proves it and records it failing for the stated reason;
+- **steps**, each ending on a checkable completion condition. Where behaviour changes, the first step writes the test that proves it, held to the test gate named by its logged path, and records it failing for the stated reason. When the proof is a screenshot or recording, the steps say what it must show and why no test passes the gate, and the last step captures it;
 - **scope**: the files and concerns in, and those out;
 - a **size check**: the expected diff, and a request to explain any overrun;
 - **STOP conditions**: the observations that mean the plan is wrong, such as a public API change nobody decided on, or an inventory much larger than planned;
@@ -21,7 +21,7 @@ A fix ticket, `T2` or later, keeps the worktree and branch, the report path patt
 
 - Read the repo's agent instructions, such as `AGENTS.md` or `CLAUDE.md`, first, and hold every changed line to them. Load each skill the ticket names before you write code.
 - Work in the worktree the ticket names, with absolute paths, and run git as `git -C <worktree>`.
-- Follow the ticket's steps in order and meet each step's completion condition. Where a step names a test to write first, watch it fail for the stated reason before implementing.
+- Follow the ticket's steps in order and meet each step's completion condition. Where a step names a test to write first, answer the test gate the ticket names for it before you write it, then watch it fail for the stated reason before implementing. When a test can't pass the gate, leave it out of the diff and report it as an open question.
 - Check each factual claim in the ticket against the live code, and report every mismatch as drift.
 - When a STOP condition fires, stop and write the report with the reason and what you observed.
 - Run heavy commands under the **throttle**: a full test suite, a build, a gate or a benchmark runs one at a time across every agent on the machine, starts only while the 1-minute load average in `uptime` is under 8, and runs under `nice -n 15`, with Vitest at `--maxWorkers=4` and turbo at `--concurrency=2`.
@@ -30,7 +30,7 @@ A fix ticket, `T2` or later, keeps the worktree and branch, the report path patt
 - Leave branches and commits to the orchestrator. Your only writes outside the worktree are the report and `layers.json`.
 - Put each question the code can't settle in the report as an open question. The orchestrator answers it in the next ticket.
 - Review your own diff against the repo's instructions and the ticket's scope, and fix what you find.
-- Leave every change uncommitted. Write the report last, after every command has finished, with no placeholders: changed files, each command with pass or fail, deliberate decisions a reviewer might question, drift, deviations or STOPs with reasons, and open questions. Reply with the report path only.
+- Leave every change uncommitted. Write the report last, after every command has finished, with no placeholders: changed files, each command with pass or fail, the gate's answers for each added or changed test, deliberate decisions a reviewer might question, drift, deviations or STOPs with reasons, and open questions. Reply with the report path only.
 
 ## Review brief
 

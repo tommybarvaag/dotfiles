@@ -48,7 +48,7 @@ Done when the Rex guide is read, your IDs and CLI paths are logged, every depend
 ## 2. Understand
 
 1. Read the input, the repo's agent instructions, such as `AGENTS.md` or `CLAUDE.md`, and every file the input names.
-2. Research the code the input touches until you can name, for each change, the files it lands in and the tests that prove it. Count the sites that actually carry the risk before planning any change that touches all of them.
+2. Research the code the input touches until you can name, for each change, the files it lands in and its **proof**: a test that passes the repo's **test gate**, or, when no test can pass it, as with visual or motion work, a screenshot or recording and the reason. The test gate is the repo's rule for which tests earn a place, such as the authoring gate in a `test-audit` skill. Log its path, or log that the repo has none. Count the sites that actually carry the risk before planning any change that touches all of them.
 3. Detect the forge from `git remote get-url origin`:
    - `github.com`: GitHub, PRs through `gh`, stacked PRs through `gh stack` when the extension is installed;
    - `dev.azure.com` or `visualstudio.com`: Azure DevOps, PRs through `az repos pr create`;
