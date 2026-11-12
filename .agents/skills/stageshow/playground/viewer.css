@@ -1,6 +1,11 @@
 :root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111; background: #fdfdfc; font-synthesis: none; -webkit-font-smoothing: antialiased; }
 * { box-sizing: border-box; }
 body { margin: 0; }
+/* The frame's height follows its example, which can put the page right at the
+   window's height. Reserve the scrollbar's room so the frame's width never
+   depends on whether the page scrolls: a scrollbar coming and going would
+   resize the example, change its height and flip the scrollbar again */
+html { scrollbar-gutter: stable; }
 button, select, input { font: inherit; }
 button, select { cursor: pointer; }
 button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible { outline: 1.5px solid #7ca9d1; outline-offset: 2px; }

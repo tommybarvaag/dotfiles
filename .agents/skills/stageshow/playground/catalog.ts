@@ -76,6 +76,8 @@ const specimens = [
   ['phones', 'Phones', 'Every phone frame in the kit.'],
   ['controls', 'Controls', 'Field, Segmented, Toggle, Tabs, Code, Chart, Slot, Scroll and a Camera push-in.'],
   ['parts', 'Parts', 'States, Check, Meter, Stream, Connector arrows, Popover and Menu, the satellite lock screen.'],
+  ['buttons', 'Buttons', 'Every Button variant and size, labels that change width beside neighbors, an icon that arrives later.'],
+  ['cards', 'Cards', 'Card padding and nested radius, Divider in a card and a toolbar, Kbd shortcuts.'],
   ['kit-extras', 'Kit extras', 'Chip, Swap, Avatar rings, Meter tones, Menu hover, Expand, solid glyphs, BrandMark.'],
   ['glass', 'Glass', 'The glass theme on a window, a chip and a popover.'],
 ].map(([id, name, note]) => ({ id, name, note, kind: 'Reference', group: 'Kit' }))

@@ -594,7 +594,7 @@ function detectNearAligned({ root, specimen }) {
     const cs = getComputedStyle(n)
     if (!/flex|grid|block/.test(cs.display) || (cs.display.includes('flex') && cs.flexDirection !== 'column')) continue
     if (n.getAnimations({ subtree: true }).some((x) => x.playState === 'running' && !(x.effect?.getTiming?.().iterations === Infinity))) continue
-    const firstWords = (k) => { for (const e of [k, ...k.querySelectorAll('*')]) { if (e.closest('svg, .ss-avatar, .ss-bar') || getComputedStyle(e).display === 'none') continue; if ([...e.childNodes].some((t) => t.nodeType === 3 && t.textContent.trim().length > 1)) { const r = e.getBoundingClientRect(); if (r.width > 8 && getComputedStyle(e).textAlign !== 'center' && getComputedStyle(e).textAlign !== 'right') return { e, r } } } return null }
+    const firstWords = (k) => { for (const e of [k, ...k.querySelectorAll('*')]) { if (e.closest('svg, .ss-avatar, .ss-bar, .ss-draft[data-editing]') || getComputedStyle(e).display === 'none' || getComputedStyle(e).visibility === 'hidden') continue; if ([...e.childNodes].some((t) => t.nodeType === 3 && t.textContent.trim().length > 1)) { const r = e.getBoundingClientRect(); if (r.width > 8 && getComputedStyle(e).textAlign !== 'center' && getComputedStyle(e).textAlign !== 'right') return { e, r } } } return null }
     // Only a small card (a comment, a note): a head line over a body line on one surface
     if (!visible(n) || n.children.length > 4) continue
     const kids = [...n.children].filter((k) => painted(k, root) && k.getBoundingClientRect().height >= 10)
@@ -808,6 +808,13 @@ function detectTightInset({ root, S, specimen }) {
 // tiles only: not the kit's window panes or phone chrome, and not specimen
 // sheets. Inside a phone the screen's cards and tiles are judged like any
 // other; only the phone's own chrome is not
+// Paints something you can see at its own edge: a fill, a border or a shadow
+// that isn't transparent (a transparent ring waiting to fade in is nothing)
+function inkedBox(cs) {
+  const seen = (c) => (c.match(/rgba?\([^)]*\)/g) || []).some((x) => alphaOf(x, 1) > 0.05)
+  return alphaOf(cs.backgroundColor, 0) > 0.05 || (parseFloat(cs.borderTopWidth) > 0 && alphaOf(cs.borderTopColor, 1) > 0.05) || (cs.boxShadow !== 'none' && seen(cs.boxShadow))
+}
+
 function detectUnevenPadding({ root, S, specimen }) {
   const out = []
   if (specimen) return out
@@ -832,7 +839,10 @@ function detectUnevenPadding({ root, S, specimen }) {
     for (const d of n.querySelectorAll('*')) {
       const figure = d.matches('.ss-count, .ss-roll')
       if (d.closest('.ss-count, .ss-roll') && !figure) continue
-      if (d.children.length && d.tagName.toLowerCase() !== 'svg' && !figure) continue
+      // A box drawn on a container (a draft's typing ring) is content at its own edge
+      const dcs = d.children.length ? getComputedStyle(d) : null
+      const ringed = !!dcs && alphaOf(dcs.backgroundColor, 0) <= 0.05 && /inset/.test(dcs.boxShadow) && !/inline/.test(dcs.display) && d.getBoundingClientRect().height >= 28 && inkedBox(dcs)
+      if (d.children.length && d.tagName.toLowerCase() !== 'svg' && !figure && !ringed) continue
       if (d.closest('svg') && d.tagName.toLowerCase() !== 'svg') continue
       const dr = d.getBoundingClientRect()
       const ds = getComputedStyle(d)
@@ -1052,6 +1062,28 @@ function detectClippedGlyph({ root }) {
     const stroke = parseFloat(getComputedStyle(svg.querySelector('path, circle, rect, line, polyline, polygon') || svg).strokeWidth) || 0
     if (over > stroke / 2 + 0.25) out.push(`clipped glyph: ${labelOf(svg.parentElement ?? svg).split(' "')[0]} > svg draws ${over.toFixed(1)} units past its viewBox, so a stroke is cut off; fit the drawing inside the box`)
   }
+  return out
+}
+
+// Unsized text: words inside a window that took the stage's 16px baseline
+// because the demo never sized them. Found by nudging the baseline for one
+// read: text that follows it was never given a size of its own
+function detectUnsizedText({ root }) {
+  const out = []
+  const els = [...root.querySelectorAll('.ss-window *')].filter((n) => !n.closest('svg, .ss-cursor, .ss-keys, .ss-kb, .ss-window__bar') && [...n.childNodes].some((t) => t.nodeType === 3 && t.textContent.trim()) && painted(n, root))
+  const before = els.map((n) => getComputedStyle(n).fontSize)
+  const was = root.style.fontSize
+  root.style.fontSize = '17px'
+  const after = els.map((n) => getComputedStyle(n).fontSize)
+  root.style.fontSize = was
+  const seen = new Set()
+  els.forEach((n, i) => {
+    if (before[i] !== '16px' || after[i] !== '17px') return
+    const label = labelOf(n)
+    if (seen.has(label)) return
+    seen.add(label)
+    out.push(`unsized text: ${label} is 16px only because nothing sized it, the stage's baseline, not the product's; app text inside a window is about 12 to 14px, so give it a size`)
+  })
   return out
 }
 
@@ -1482,7 +1514,13 @@ function detectTouchingText({ root }) {
     const range = document.createRange()
     range.setStart(texts[0], 0)
     range.setEnd(texts[texts.length - 1], texts[texts.length - 1].length)
-    const t = range.getBoundingClientRect()
+    let t = range.getBoundingClientRect()
+    // Text cut by its own box (an ellipsis) only paints inside that box
+    const ns = getComputedStyle(n)
+    if (ns.overflowX !== 'visible') {
+      const nb = n.getBoundingClientRect()
+      t = new DOMRect(Math.max(t.left, nb.left), t.top, Math.min(t.right, nb.right) - Math.max(t.left, nb.left), t.height)
+    }
     if (t.width < 2) continue
     const p = n.parentElement
     const pairs = [...(p ? [...p.children].filter((c) => c !== n).map((c) => [c, p]) : []), ...[...n.children].map((c) => [c, n])]
@@ -1514,6 +1552,164 @@ function detectTouchingText({ root }) {
       const d = b.left >= t.right - 1 ? b.left - t.right : t.left >= b.right - 1 ? t.left - b.right : -1
       const fixed = parseFloat(getComputedStyle(holder).columnGap) >= 4
       if (d < 5 && !(fixed && d >= 2)) out.push(`touching: ${tagOf(n)} "${n.textContent.trim().slice(0, 18)}" is ${d < 0 ? 'overlapping' : `${px(d)}px from`} ${tagOf(c)}; text never touches a neighboring box, so hold the pair apart with a fixed gap (gap: 8-12px), not leftover space`)
+    }
+  }
+  return out
+}
+
+// A ring drawn on a pseudo-element (a field's focus outline as its own
+// layer, so the text never moves) is invisible to the box checks: it is
+// measured here from the element and the pseudo's insets. It must sit in
+// space its field owns: never over a neighbor's words, and never past the
+// card it sits in.
+// A Draft moved so its typed words line up with the name above, which
+// leaves its box hanging past that column: the box's edge belongs on it
+function detectDraftHang({ root }) {
+  const out = []
+  for (const box of root.querySelectorAll('.ss-draft[data-editing] > .ss-draft__box')) {
+    if (!visibleThrough(box, root)) continue
+    const b = box.getBoundingClientRect()
+    const words = box.querySelector('.ss-draft__typed, .ss-draft__ph')
+    if (!words) continue
+    const range = document.createRange()
+    range.selectNodeContents(words)
+    const w = [...range.getClientRects()].find((x) => x.width > 0) ?? words.getBoundingClientRect()
+    let card = box.parentElement
+    for (let i = 0; card && i < 8; i++, card = card.parentElement) {
+      const cs = getComputedStyle(card)
+      if (cs.boxShadow !== 'none' || (cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent')) break
+    }
+    if (!card) continue
+    const walk = document.createTreeWalker(card, NodeFilter.SHOW_TEXT)
+    for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+      // Words, not an avatar's initial: a full-width box's words may happen to line up with that
+      if (t.textContent.trim().length < 2 || box.contains(t) || t.parentElement.closest('.ss-avatar') || !visibleThrough(t.parentElement, root)) continue
+      const r = document.createRange()
+      r.selectNodeContents(t)
+      const tr = r.getBoundingClientRect()
+      if (tr.bottom > b.top + 1 || tr.width < 8) continue
+      const hang = tr.left - b.left
+      if (hang >= 1.5 && hang <= 24 && Math.abs(w.left - tr.left) <= 2) {
+        out.push(`uneven inset: the Draft's box hangs ${Math.round(hang)}px left of the column "${t.textContent.trim().slice(0, 20)}" starts; put the Draft in that column (no margin shift while editing) so the box's edge sits on it and the words pad inside`)
+        break
+      }
+    }
+  }
+  return out
+}
+
+// A message or comment under its author's name (an avatar beside it): from the name's baseline
+// to the body's capitals at least the body's own size (the comment golds
+// sit at 1.1 to 1.5 times). A one-line preview in a list row (nowrap,
+// truncated) is a denser thing and stays with the tight stack check.
+function detectBylineGap({ root }) {
+  const out = []
+  const lines = (t) => { const r = document.createRange(); r.selectNodeContents(t); return [...r.getClientRects()].filter((x) => x.width > 0 && x.height > 0) }
+  const texts = []
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+    const el = t.parentElement
+    if (!el || t.textContent.trim().length < 2 || el.closest('.ss-cursor, .ss-keys, .ss-kb, svg, .ss-code, .ss-term, .ss-draft__size, .ss-draft__ph, .ss-count, .ss-roll, .ss-notification') || !visibleThrough(el, root)) continue
+    const ls = lines(t)
+    if (!ls.length) continue
+    const cs = getComputedStyle(el)
+    texts.push({ t, el, cs, first: ls[0], last: ls.at(-1), size: parseFloat(cs.fontSize), weight: Number(cs.fontWeight) || 400 })
+  }
+  const seen = new Set()
+  for (const b of texts) {
+    if (b.t.textContent.trim().length < 16 || b.size > 18 || b.cs.whiteSpace === 'nowrap' || b.cs.textOverflow === 'ellipsis' || seen.has(b.el)) continue
+    let name = null
+    for (const n of texts) {
+      if (n === b || n.weight < 600 || n.weight <= b.weight || Math.abs(n.first.left - b.first.left) > 2) continue
+      if (n.last.bottom > b.first.top + 1 || n.last.bottom < b.first.top - b.size * 2.2) continue
+      if (!name || n.last.bottom > name.last.bottom) name = n
+    }
+    if (!name) continue
+    // An author has an avatar just left of the name (a round face 16 to 48px); a title over its subtitle doesn't
+    const midY = (name.first.top + name.first.bottom) / 2
+    // (by geometry: the stage's layers often take no pointer events, so hit-testing can't find it)
+    let near = name.el
+    for (let i = 0; i < 4 && near.parentElement && near !== root; i++) near = near.parentElement
+    const face = [...near.querySelectorAll('*')].some((e) => { const r = e.getBoundingClientRect(); if (r.width < 16 || r.width > 48 || Math.abs(r.width - r.height) > 2 || r.right > name.first.left - 2 || r.right < name.first.left - 44 || r.top > midY || r.bottom < midY) return false; const br = getComputedStyle(e).borderTopLeftRadius; return br.endsWith('%') ? parseFloat(br) >= 40 : parseFloat(br) >= r.width * 0.4 })
+    if (!face) continue
+    // Em boxes to ink: the name's baseline sits about 0.21em above its box's foot, the body's capitals 0.27em below its top
+    const base = name.last.bottom - (name.last.height - name.size) / 2 - name.size * 0.21
+    const cap = b.first.top + (b.first.height - b.size) / 2 + b.size * 0.27
+    const gap = cap - base
+    if (gap < b.size * 0.95 && gap > -b.size) {
+      seen.add(b.el)
+      out.push(`tight stack: ${labelOf(b.el)} sits ${gap.toFixed(1)}px under its name ${labelOf(name.el)} (baseline to capitals); a message under its author wants at least its own size there (${Math.round(b.size)}px), so give the body a few px more top margin`)
+    }
+  }
+  return out
+}
+
+function detectPseudoRing({ root }) {
+  const out = []
+  const seen = new Set()
+  const ink = (c) => { const m = c.match(/rgba?\(([^)]+)\)/g); return !!m && m.some((x) => { const v = x.slice(x.indexOf('(') + 1, -1).split(',').map(Number); return v.length < 4 || v[3] > 0.05 }) }
+  for (const n of root.querySelectorAll('*')) {
+    // A ring around words (a field): an icon's or a track's own ring is something else
+    if (n.closest('.ss-cursor, .ss-keys, .ss-kb, svg') || !shown(n, root) || !(n.textContent || '').trim()) continue
+    // The ring as a pseudo-element, or as an empty child span of its own
+    const layers = [...['::before', '::after'].map((w) => [getComputedStyle(n, w), `${tagOf(n)}${w}`, true]),
+      ...[...n.children].filter((c) => !c.children.length && !(c.textContent || '').trim()).map((c) => [getComputedStyle(c), tagOf(c), false])]
+    for (const [ps, label, pseudo] of layers) {
+      if ((pseudo && (ps.content === 'none' || ps.content === 'normal')) || ps.position !== 'absolute' || parseFloat(ps.opacity) < 0.3 || ps.display === 'none') continue
+      const ring = (ps.boxShadow !== 'none' && ink(ps.boxShadow)) || (parseFloat(ps.borderTopWidth) > 0 && ink(ps.borderTopColor))
+      if (!ring || getComputedStyle(n).position === 'static') continue
+      const E = n.getBoundingClientRect()
+      const ins = ['top', 'right', 'bottom', 'left'].map((k) => ps[k].endsWith('px') ? parseFloat(ps[k]) : NaN)
+      // Only a ring drawn outside its element (a field's outline as its own layer); an overlay's own border sits over the page by design
+      if (ins.some(Number.isNaN) || !ins.some((v) => v < 0) || ins.some((v) => v < -16) || n.closest('.ss-popover, .ss-menu, .ss-toast')) continue
+      // An outer shadow ring (a soft halo) paints its spread beyond the box
+      const spread = Math.max(0, ...(ps.boxShadow === 'none' ? [] : ps.boxShadow.split(/,(?![^(]*\))/).filter((x) => !/inset/.test(x)).map((x) => parseFloat((x.replace(/rgba?\([^)]*\)/, '').trim().split(/\s+/)[3]) || '0'))))
+      const R = { left: E.left + ins[3] - spread, top: E.top + ins[0] - spread, right: E.right - ins[1] + spread, bottom: E.bottom - ins[2] + spread }
+      if (R.right - R.left < 8 || R.bottom - R.top < 8) continue
+      // Words of a neighbor under the ring
+      const box = n.parentElement?.parentElement || n.parentElement
+      let hit = null
+      if (box) {
+        const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT)
+        for (let t = walk.nextNode(); t && !hit; t = walk.nextNode()) {
+          if (!t.textContent.trim() || n.contains(t) || !shown(t.parentElement, root)) continue
+          const r = document.createRange()
+          r.selectNodeContents(t)
+          for (const b of r.getClientRects()) {
+            if (b.width < 2) continue
+            if (Math.min(b.right, R.right) - Math.max(b.left, R.left) > 1 && Math.min(b.bottom, R.bottom) - Math.max(b.top, R.top) > -2) { hit = t.textContent.trim().slice(0, 18); break }
+          }
+        }
+      }
+      // Past the card it sits in
+      let past = null
+      for (let a = n.parentElement; a && a !== root; a = a.parentElement) {
+        const as = getComputedStyle(a)
+        if (!hasSurface(as) && as.overflowX === 'visible') continue
+        const A = a.getBoundingClientRect()
+        const over = Math.max(A.left - R.left, R.right - A.right, A.top - R.top, R.bottom - A.bottom)
+        if (over > 0.5) past = { a, over }
+        break
+      }
+      // Off its column: the ring's edge a few px outside the column the field
+      // sits in (the name's left edge, the buttons' right), toward the card
+      let off = null
+      const col = n.parentElement
+      if (col) {
+        const cs = getComputedStyle(col)
+        const C = col.getBoundingClientRect()
+        const k = C.width / (col.offsetWidth || C.width)
+        const cl = C.left + (parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth)) * k
+        const cr = C.right - (parseFloat(cs.paddingRight) + parseFloat(cs.borderRightWidth)) * k
+        const l = cl - (R.left + spread), r = (R.right - spread) - cr
+        if (l > 1.5 && l <= 24 * k) off = { side: 'left', d: l / k }
+        else if (r > 1.5 && r <= 24 * k) off = { side: 'right', d: r / k }
+      }
+      const key = label
+      if (seen.has(key)) continue
+      if (hit) { seen.add(key); out.push(`spills its slot: the ring on ${label} runs into "${hit}"; a ring drawn as its own layer needs room its field owns (a margin that grows with it), never a neighbor's words`) }
+      else if (off) { seen.add(key); out.push(`uneven inset: the ring on ${label} hangs ${px(off.d)}px past its column on the ${off.side}; inset the field by the ring's reach (or pad the field itself) so the box's edges sit on the column: the name's left edge, the buttons' right`) }
+      else if (past) { seen.add(key); out.push(`spills its slot: the ring on ${label} runs ${px(past.over)}px past ${tagOf(past.a)}; inset the field so its ring stays inside the card`) }
     }
   }
   return out
@@ -1794,6 +1990,7 @@ export function checkStage(root) {
   out.push(...detectKitOverride(ctx))
   out.push(...detectClippedGlyph(ctx))
   out.push(...detectUnitWrapped(ctx))
+  out.push(...detectUnsizedText(ctx))
   out.push(...detectOnionSkin(ctx))
   out.push(...detectTightMark(ctx))
   out.push(...detectRowRhythm(ctx))
@@ -1808,6 +2005,9 @@ export function checkStage(root) {
   out.push(...detectSliverColumn(frame))
   out.push(...detectOverlayRoom(frame))
   out.push(...detectTouchingText(frame))
+  out.push(...detectPseudoRing(frame))
+  out.push(...detectDraftHang(frame))
+  out.push(...detectBylineGap(frame))
   out.push(...detectTouchingBars(frame))
   out.push(...detectDarkSlab(frame))
   out.push(...detectLightsTangent(frame))
@@ -1907,14 +2107,14 @@ export function detectSpills(root) {
 // together so they see each other, exposed as window.__ssFilmChecks
 export function filmChecksSource() {
   const fns = [
-    rgbaOf, alphaOf, paintsSurface, surface, visible, hasSurface, visibleThrough, painted, shown, fadeThrough, labelOf, tagOf, px, nearTangent,
+    rgbaOf, alphaOf, paintsSurface, inkedBox, surface, visible, hasSurface, visibleThrough, painted, shown, fadeThrough, labelOf, tagOf, px, nearTangent,
     stageContext, cameraMoving,
     detectClipped, detectPaddingRunIns, detectCoveredCopy, detectLopsidedPills,
     collectSurfaces, detectEdgeTangents, detectUnclipped, detectTightBars, detectDoubleCorner, detectPairTangents,
-    detectTranslucentIcons, detectSkeletonLadder, detectLooseList, detectTightControl, detectInventedMark, detectNearAligned, detectUnevenInset, detectMixedIcons, detectEmojiIcon, detectFatRow, detectEmptyPane, detectTightInset, detectUnevenPadding, detectUnevenGutters, detectPillInset, detectTightStack, detectKitOverride, detectClippedGlyph, detectUnitWrapped, detectOnionSkin, detectTightMark, detectRowRhythm, detectHalfPixelGlyph, detectSqueezed,
+    detectTranslucentIcons, detectSkeletonLadder, detectLooseList, detectTightControl, detectInventedMark, detectNearAligned, detectUnevenInset, detectMixedIcons, detectEmojiIcon, detectFatRow, detectEmptyPane, detectTightInset, detectUnevenPadding, detectUnevenGutters, detectPillInset, detectTightStack, detectKitOverride, detectClippedGlyph, detectUnitWrapped, detectUnsizedText, detectOnionSkin, detectTightMark, detectRowRhythm, detectHalfPixelGlyph, detectSqueezed,
     frameContext, ownClip, animating, shownArea, satellite,
-    detectHeroFraming, detectSatelliteGutters, detectBoxEdges, detectSliverColumn, detectOverlayRoom, detectTouchingText, detectTouchingBars, detectDarkSlab, detectLightsTangent, detectShadowHalo, detectFocusFeather, detectTargetsCut, detectWordsCut, detectControlsCut,
+    detectHeroFraming, detectSatelliteGutters, detectBoxEdges, detectSliverColumn, detectOverlayRoom, detectTouchingText, detectPseudoRing, detectDraftHang, detectBylineGap, detectTouchingBars, detectDarkSlab, detectLightsTangent, detectShadowHalo, detectFocusFeather, detectTargetsCut, detectWordsCut, detectControlsCut,
     checkStage, smallestText, detectSpills,
   ]
-  return `(() => {\n${fns.map((fn) => fn.toString()).join('\n')}\nwindow.__ssFilmChecks = { checkStage, smallestText, detectSpills }\n})()`
+  return `(() => {\n${fns.map((fn) => fn.toString()).join('\n')}\nwindow.__ssFilmChecks = { checkStage, smallestText, detectSpills, detectDraftHang, detectUnevenPadding, stageContext, detectTightStack, detectBylineGap }\n})()`
 }

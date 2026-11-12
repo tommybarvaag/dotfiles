@@ -9,7 +9,7 @@ export type Rect = { x: number; y: number; width: number; height: number }
  * named element with x and y as fractions of its box ({ at: 'apply', x: 0.8, y: 0.7 }),
  * or a point in stage pixels.
  */
-export type Target = string | Point | { at: string; x: number; y: number } | { wide: Target; compact: Target }
+export type Target = string | Point | { at: string; x?: number; y?: number } | { wide: Target; compact: Target }
 
 export const EMPTY: Rect = { x: 0, y: 0, width: 0, height: 0 }
 

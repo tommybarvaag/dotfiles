@@ -488,7 +488,7 @@ const clipFindings = (stageKey, minFrames) => [...clipped.values()]
   .filter((entry) => entry.stageKey === stageKey)
   .filter(({ message: f }) => !(sideSatellites.has(stageKey) && (f.startsWith('framing: corner bleed') || f.includes('runs off the bottom but sits off center'))))
   .filter(({ message: f, at }) => at.length >= minFrames || /^(translucent|covers|framing|small text)/.test(f))
-  .map(({ message: f, at }) => `${/^(layout|uneven|translucent|lopsided|near-tangent|covers|unclipped|double corner|tight lines|tight stack|loose stack|tight mark|tight inset|skeleton ladder|onion skin|kit override|unit wrapped|clipped glyph|loose list|empty pane|fat row|emoji icon|anchor drift|uneven padding|mixed icons|tight control|invented mark|uneven inset|uneven gutters|avatar alignment|spills its slot|half-pixel|squeezed|cut by the crop|framing|touching|dark slab|small text)/.test(f) ? '' : 'clipped: '}${f} (${at.length > 3 ? `${at.length} frames from ${at[0]}` : at.join(', ')})`)
+  .map(({ message: f, at }) => `${/^(layout|uneven|translucent|lopsided|near-tangent|covers|unclipped|double corner|tight lines|tight stack|loose stack|tight mark|tight inset|skeleton ladder|onion skin|kit override|unit wrapped|unsized text|clipped glyph|loose list|empty pane|fat row|emoji icon|anchor drift|uneven padding|mixed icons|tight control|invented mark|uneven inset|uneven gutters|avatar alignment|spills its slot|half-pixel|squeezed|cut by the crop|framing|touching|dark slab|small text)/.test(f) ? '' : 'clipped: '}${f} (${at.length > 3 ? `${at.length} frames from ${at[0]}` : at.join(', ')})`)
 
 const finishReport = (snapshot, requestedMs = 0) => {
   const errors = [...notes, ...(snapshot?.errors || [])]
@@ -519,7 +519,7 @@ const finishReport = (snapshot, requestedMs = 0) => {
   for (const error of errors) console.error(`incomplete: ${error}`)
   console.log(`film: ${result.status}; ${still ? 'still capture only, motion was not judged' : 'watch the motion and inspect every image before approval'}`)
   if (has('gate')) {
-    const NEVER = /^(clipped: )?(framing|cut by the crop|tight stack|loose stack|tight mark|tight inset|skeleton ladder|onion skin|kit override|unit wrapped|clipped glyph|loose list|empty pane|fat row|emoji icon|anchor drift|uneven padding|mixed icons|tight control|invented mark|uneven inset|uneven gutters|avatar alignment|spills its slot):/
+    const NEVER = /^(clipped: )?(framing|cut by the crop|tight stack|loose stack|tight mark|tight inset|skeleton ladder|onion skin|kit override|unit wrapped|unsized text|clipped glyph|loose list|empty pane|fat row|emoji icon|anchor drift|uneven padding|mixed icons|tight control|invented mark|uneven inset|uneven gutters|avatar alignment|spills its slot):/
     const bad = [...stages.flatMap((stage) => stage.findings.filter((line) => NEVER.test(line))), ...notes.filter((line) => /\[stageshow\] selection drift:/.test(line))]
     if (bad.length) { console.log(`rehearsal failed: ${bad.length} never-intentional line(s) above`); process.exitCode = 1 }
     else console.log('rehearsal passed (necessary, not sufficient: references/verify.md and the fresh eye in review.md still stand)')
@@ -529,7 +529,8 @@ const finishReport = (snapshot, requestedMs = 0) => {
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, JSON.stringify(result, null, 2) + '\n')
   }
-  process.exitCode = result.exitCode
+  // Keep the higher code: a failed gate (1) or an incomplete film (2) is never reported as a pass
+  process.exitCode = Math.max(process.exitCode ?? 0, result.exitCode)
 }
 
 const shots = []

@@ -49,7 +49,7 @@ Index: [Restraint](#restraint), [Type](#type), [Spacing and alignment](#spacing-
 
 ## Spacing and alignment
 
-- **A button keeps 8px or more from the field, line or card edge above it;** sitting on the field it reads as touching (film flags `tight control`).
+- **A button keeps 8 to 12px from the field, line or card edge above it;** sitting on the field it reads as touching (film flags `tight control`), and much more lets it drift off from the field it belongs to. A floating card (a comment popup, a toast) pads the same all round, measured to the avatar's and button's edges, not their words: 20px above the name with 14px at the side reads as a miss. A composer's Post or Send sits close under its box; padding sized for the posted card goes on the card, not between box and button.
 - **Words keep a 12px inset** from the edge of a window, card, panel or hovered row; film flags `tight inset` under 8px. Bars may bleed, words do not.
 - **Row padding is 12px,** 8px for a dense list; a one-line row three times taller than its words is a `fat row`.
 - **A title over its subtitle reads as one item:** 4 to 6px of ink between the lines, a 1.3 line height plus a 2px gap. The air comes from the row's padding (`examples/gmail`).
@@ -77,6 +77,8 @@ Index: [Restraint](#restraint), [Type](#type), [Spacing and alignment](#spacing-
 - **Hover and selection fills are inset and rounded;** negative margins go on the list, not the row; copy a real product's square fills (`examples/wikipedia`).
 - **Clone a real product's menu from its computed styles** (`examples/wikipedia`).
 - **A trigger with its popover open keeps its pressed look:** `data-open`, styled like `[data-hover]` (`examples/hero-demo`).
+
+- **A progress ring is one track and one arc,** round caps, never butt-capped dashes chopped into segments; a week of days goes in the dots beside it. A number in a ring centers on its digits: `Roll` with proportional figures, not `Count`, whose fixed-width digits leave a 1 off center; trim it to cap height (`text-box: trim-both cap alphabetic`) and set an icon above it apart, so the figure the eye lands on is the ring's center, not the pair's box.
 
 ## Icons and logos
 

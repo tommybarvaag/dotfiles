@@ -47,6 +47,9 @@ export function auditLayout(root) {
     if (moving(el)) { deferred.push(`${name(el)}: control geometry is moving`); continue }
     const { cs, r, sx, sy, h } = metrics(el)
     if (cs.writingMode !== 'horizontal-tb') { deferred.push(`${name(el)}: non-horizontal writing mode`); continue }
+    // A label trimmed to its letters (text-box: trim-both cap alphabetic) is
+    // meant to be shorter than its line box; its parent holds the padding
+    if (cs.textBoxTrim && cs.textBoxTrim !== 'none') continue
     const atoms = []
     let movingText = false
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)

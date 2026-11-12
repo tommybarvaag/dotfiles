@@ -74,6 +74,7 @@ The last pass. Every answer comes from a frame you looked at, never from the cod
 Gold: <example> (what you kept, what you changed)
 Beats: 1 … 2 … 3 … payoff, loop <n>s
 Captured: widths <wide, 390>, looks, states, reduced motion
+Gate: <the last line of film.mjs --gate on the loop, pasted>
 Film: <each gate line> → <frame> → <fix or why it stands>
 Review: <reviewer's list> → <your response>
 Assumptions:

@@ -425,60 +425,13 @@
   padding: 0;
 }
 
-.gd-field {
-  position: relative;
-  min-height: 19px;
+/* The comment draft: the kit's Draft, in Docs' blue */
+.gd-draft {
+  --ss-draft-ring: var(--gd-blue);
+  --ss-draft-radius: 6px;
+  --ss-draft-pad-y: 6px;
+  --ss-draft-pad-x: 8px;
   margin: 10px 0 2px;
-}
-
-.gd-field[data-on] {
-  margin: 10px 0 10px;
-}
-
-.gd-field__ring {
-  position: absolute;
-  inset: -7px -8px;
-  border-radius: 6px;
-  box-shadow: inset 0 0 0 2px var(--gd-blue);
-  opacity: 0;
-  transition: opacity 0.25s ease;
-}
-
-.gd-field[data-on] .gd-field__ring {
-  opacity: 1;
-}
-
-.gd-field__ph {
-  position: absolute;
-  inset: 0 0 auto 3px;
-  color: var(--gd-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: opacity 0.12s ease;
-}
-
-.gd-field:not([data-empty]) .gd-field__ph,
-.gd-field:not([data-on]) .gd-field__ph {
-  opacity: 0;
-}
-
-.gd-field__text {
-  position: relative;
-}
-
-.gd-caret {
-  display: inline-block;
-  width: 1.5px;
-  height: 15px;
-  margin-left: 1px;
-  vertical-align: -3px;
-  background: var(--gd-ink);
-  opacity: 0;
-}
-
-.gd-caret[data-on] {
-  opacity: 1;
 }
 
 .gd-actions {

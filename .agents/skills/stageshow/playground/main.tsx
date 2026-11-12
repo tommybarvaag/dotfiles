@@ -23,6 +23,10 @@ async function boot() {
     mount()
     return
   }
+  // The viewer sizes this iframe to the example's height, so the page never
+  // needs to scroll. A scrollbar here would narrow the example, rescale it,
+  // change its height and remove the scrollbar again, every frame.
+  document.documentElement.style.overflow = 'hidden'
   // Only the iframe owns virtual time. Capture the native clocks before
   // installing it so the viewer and this driver remain responsive.
   const nativeRaf = window.requestAnimationFrame.bind(window)
@@ -85,7 +89,9 @@ async function boot() {
     await clock.settle()
     const example = document.getElementById('example')
     if (!example) throw new Error('The example did not mount')
-    new ResizeObserver(() => send({ height: example.offsetHeight })).observe(example)
+    // Round up: a scaled stage is fractional (485.33px) and offsetHeight
+    // rounds it to the nearest pixel, leaving the iframe a sliver short.
+    new ResizeObserver(() => send({ height: Math.ceil(example.getBoundingClientRect().height) })).observe(example)
     syncScene = () => {
       const stages = [...example.querySelectorAll('.ss-stage')]
       // Still/reduced scenes need their initial measurement frames before

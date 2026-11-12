@@ -314,7 +314,8 @@ export function Stage<S extends object>({
       return pos.current
     }
     const r = rectOf(root, el, scaleRef.current)
-    const f = typeof t === 'string' ? { x: 0.5, y: 0.5 } : (t as { x: number; y: number })
+    // A name alone, or { at } without x and y, aims at the middle
+    const f = typeof t === 'string' ? { x: 0.5, y: 0.5 } : { x: (t as { x?: number }).x ?? 0.5, y: (t as { y?: number }).y ?? 0.5 }
     return { x: r.x + r.width * f.x, y: r.y + r.height * f.y }
   }, [])
 

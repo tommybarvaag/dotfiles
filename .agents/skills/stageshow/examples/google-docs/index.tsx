@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import { BrandMark, Avatar, Bar, Collapse, Stage, Window, type Act, type Layout } from '../../kit'
+import { BrandMark, Avatar, Bar, Collapse, Draft, Stage, Window, type Act, type Layout } from '../../kit'
 import './docs.css'
 
 // Google Docs: comment on a sentence, get a reply.
@@ -192,14 +192,7 @@ function Docs({ s, rect, layout }: { s: S; rect: (n: string) => { x: number; y: 
             </div>
           </div>
           <div className="gd-body">
-            <div className="gd-field" data-on={(s.card === 'compose') || undefined} data-empty={!s.draft || undefined}>
-              <span className="gd-field__ring" />
-              <span className="gd-field__ph">Comment or add others with @</span>
-              <span className="gd-field__text">
-                {s.draft}
-                <span className="gd-caret" data-on={s.card === 'compose' || undefined} />
-              </span>
-            </div>
+            <Draft className="gd-draft" value={s.draft} full={COMMENT} editing={s.card === 'compose'} placeholder="Comment or add others with @" />
           </div>
           <Collapse open={s.card === 'compose' || s.card === 'hidden'}>
             <div className="gd-actions">

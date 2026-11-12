@@ -382,7 +382,7 @@ export function watchMotion(selector) {
       // A flyer shows through its inner box (where it buds and lifts)
       const lift = el.matches('.ss-fly') ? el.querySelector('.ss-fly__lift') : null
       const ov = lift ? o * Number(getComputedStyle(lift).opacity) : o
-      cur.set(el, { o: ov, r, sc, busy: busyUp(lift ?? el), parent: el.parentElement, dashed, out, roll: !!el.closest('.ss-roll, .ss-count'), signature: sig(el), typed: !!el.closest('[data-typing], .ss-field__chars, .ss-field__placeholder, .ss-kb__callout, .ss-kb__suggest') })
+      cur.set(el, { o: ov, r, sc, busy: busyUp(lift ?? el), parent: el.parentElement, dashed, out, roll: !!el.closest('.ss-roll, .ss-count'), signature: sig(el), typed: !!el.closest('[data-typing], .ss-field__chars, .ss-field__placeholder, .ss-draft__ph, .ss-draft__typed, .ss-kb__callout, .ss-kb__suggest') })
     }
     const near = (a, b) => Math.abs(a.left + a.width / 2 - b.left - b.width / 2) < 40 * k && Math.abs(a.top + a.height / 2 - b.top - b.height / 2) < 40 * k && Math.abs(a.width - b.width) < Math.max(a.width, b.width) * 0.35
     const left = [...vis].filter(([el]) => !cur.has(el))
@@ -413,7 +413,7 @@ export function watchMotion(selector) {
       // callout flashes, a text selection or match highlight paints at once.
       // A Roll splits its line into parts on the first change (the part that
       // stays is still painted), so its own pieces aren't judged
-      const typed = (el) => el.closest('[data-typing], .ss-field__chars, .ss-field__placeholder, .ss-kb__callout, .ss-kb__suggest')
+      const typed = (el) => el.closest('[data-typing], .ss-field__chars, .ss-field__placeholder, .ss-draft__ph, .ss-draft__typed, .ss-kb__callout, .ss-kb__suggest')
       for (const [el, c] of came) {
         if (cur.has(c.parent) && !vis.has(c.parent)) continue
         if (typed(el) || c.out || el.closest('.ss-roll') || tiny.has(el)) continue

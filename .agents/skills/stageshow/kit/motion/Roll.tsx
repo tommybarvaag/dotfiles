@@ -178,7 +178,7 @@ function RollNow({
             ? <span className="ss-roll__char">{now}</span>
             : key > 0
             ? units.map((c, i) => (
-                <span key={i} className="ss-roll__char" style={{ animationDelay: `${110 + i * stagger}ms` }}>
+                <span key={i} className="ss-roll__char" style={{ animationDelay: `${i * stagger}ms` }}>
                   {c}
                 </span>
               ))

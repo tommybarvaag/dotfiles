@@ -62,6 +62,7 @@ Not candidates for judgment: fix the cause and re-shoot. `film.mjs --gate` ends 
 | `onion skin:` | See-through fills overlapping at rest |
 | `kit override:` | Your CSS reshaping a kit part's geometry (rows, bubbles, stamps, avatars, phones) |
 | `unit wrapped:` | A stat's unit on its own line |
+| `unsized text:` | Text in a window left at the stage's 16px baseline because nothing sized it |
 | `clipped glyph:` | An icon drawn past its box |
 | `loose list:` | Rows spread out to fill a pane |
 | `fat row:` | A one-line row three times taller than its words |
@@ -75,7 +76,7 @@ Not candidates for judgment: fix the cause and re-shoot. `film.mjs --gate` ends 
 | `uneven inset:` | A bar, pill or row of controls whose children sit much closer to one end than the other |
 | `uneven gutters:` | A window or panel in a tile much closer to one side than the other |
 | `avatar alignment:` | A body under an avatar row starting under the avatar instead of at the name's edge |
-| `spills its slot:` | Content running past the width it was laid out in, or closing its row's gap |
+| `spills its slot:` | Content running past the width it was laid out in, or closing its row's gap; a ring drawn as its own layer running into a neighbor's words or past its card |
 
 A `[stageshow] selection drift` kit warning (a text selection that isn't under the I-beam) fails the gate too.
 
