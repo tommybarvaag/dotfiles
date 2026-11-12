@@ -4,3 +4,4 @@
 .env.local
 Brewfile.lock.json
 tools/git-fuzzy/
+.research/
