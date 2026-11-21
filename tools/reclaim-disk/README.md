@@ -370,8 +370,14 @@ bun run format     # prettier --write, the whole package
 bun run lint       # oxlint
 bun run typecheck  # tsc --noEmit
 bun test
+bun run check      # all of the above, fail-fast: exactly what CI runs
 bun run src/main.ts --help
 ```
+
+`bun run check` is the one command to run before pushing: `prettier --check`,
+then lint, typecheck and tests, stopping at the first failure. CI runs the same
+command on macOS from `.github/workflows/reclaim-disk.yml`, on every pull
+request and push to `main` that touches this package.
 
 Prettier and oxlint are scoped to this package — `.prettierrc.json` and
 `.oxlintrc.json` live here, not at the root of the dotfiles repo, so nothing

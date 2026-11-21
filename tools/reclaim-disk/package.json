@@ -10,9 +10,11 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "lint": "oxlint",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-rc.115",
