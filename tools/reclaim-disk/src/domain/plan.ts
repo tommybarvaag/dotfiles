@@ -36,6 +36,20 @@ export type ReclaimTarget =
       readonly repository: string;
       /** What the worktree's git status proves about it. */
       readonly state: Worktree.WorktreeState;
+    }
+  | {
+      readonly _tag: "VitestTempDir";
+      /** The project temp directory a Vitest run left behind. */
+      readonly path: string;
+      /** Total size of the directory. */
+      readonly size: Kilobytes.Kilobytes;
+      /**
+       * When anything was last written into it, as read at the survey.
+       *
+       * Carried so the deletion can check it is still that directory: one that
+       * has been written to since belongs to a run that is still going.
+       */
+      readonly lastWritten: Date;
     };
 
 /** A directory the scan could not establish anything about. */
@@ -96,6 +110,22 @@ export type Disposition =
  * the type says so once instead of leaving two impossible cases to handle.
  */
 export type CacheDisposition = Extract<Disposition, { readonly _tag: "Delete" | "PruneOlderThan" }>;
+
+/**
+ * Everything a run decided before it looked at the disk.
+ *
+ * Both instants are resolved once, at the command line, so the plan that is
+ * reported is the plan that is confirmed and the plan that is carried out.
+ */
+export type Policy = {
+  /** What this run does with every turbo cache it finds. */
+  readonly caches: CacheDisposition;
+  /**
+   * A Vitest temp directory last written to before this instant is taken; one
+   * written to since may belong to a run still in progress, and is kept.
+   */
+  readonly vitestTempStaleBefore: Cutoff.Cutoff;
+};
 
 /**
  * A target paired with the action decided for it.
@@ -221,19 +251,43 @@ export function decideWorktree(state: Worktree.WorktreeState): Disposition {
 }
 
 /**
+ * Decide what to do with a Vitest temp directory.
+ *
+ * A run that is still going keeps writing modules into its directory, and
+ * reads them back by path for as long as it lives, so deleting one out from
+ * under it fails the run. Nothing in the directory marks it as abandoned; the
+ * only evidence available without a process table is that nothing has been
+ * written into it for a while. A watch-mode session left idle past the cutoff
+ * is indistinguishable from a dead one and will lose its directory - which
+ * fails that run and loses nothing, since every file in it is regenerated.
+ *
+ * @param lastWritten - When anything was last written into the directory.
+ * @param staleBefore - The resolved cutoff.
+ * @returns A delete when it is older than the cutoff, and a keep otherwise.
+ */
+export function decideVitestTempDir(lastWritten: Date, staleBefore: Cutoff.Cutoff): Disposition {
+  return lastWritten.getTime() < staleBefore.getTime()
+    ? { _tag: "Delete" }
+    : { _tag: "Keep", reason: "written to recently; a Vitest run may still be using it" };
+}
+
+/**
  * Decide what to do with a single target.
  *
  * @param target - The scanned target.
- * @param caches - What this run does with a turbo cache.
+ * @param policy - What this run decided before it looked.
  * @returns The disposition for that target.
  */
-function dispositionFor(target: ReclaimTarget, caches: CacheDisposition): Disposition {
+function dispositionFor(target: ReclaimTarget, policy: Policy): Disposition {
   switch (target._tag) {
     case "TurboCache":
-      return caches;
+      return policy.caches;
 
     case "AgentWorktree":
       return decideWorktree(target.state);
+
+    case "VitestTempDir":
+      return decideVitestTempDir(target.lastWritten, policy.vitestTempStaleBefore);
 
     default:
       return casesHandled(target);
@@ -275,10 +329,10 @@ export function owningRepositories(
  * Build a plan from what the scans established, dropping empty targets.
  *
  * @param scanned - Everything the scans found, examined or not.
- * @param caches - What this run does with a turbo cache, resolved before the scan ran.
+ * @param policy - What this run decided before the scan ran.
  * @returns The partitioned plan and its total.
  */
-export function make(scanned: ReadonlyArray<Scanned>, caches: CacheDisposition): Plan {
+export function make(scanned: ReadonlyArray<Scanned>, policy: Policy): Plan {
   const reclaiming: Array<ReclaimingEntry> = [];
   const keeping: Array<KeptEntry> = [];
   const unexamined: Array<Unexamined> = [];
@@ -295,7 +349,7 @@ export function make(scanned: ReadonlyArray<Scanned>, caches: CacheDisposition):
       continue;
     }
 
-    const disposition = dispositionFor(target, caches);
+    const disposition = dispositionFor(target, policy);
 
     if (disposition._tag === "Keep") {
       keeping.push({ target, disposition });

@@ -10,14 +10,17 @@
 import { Context, type Effect } from "effect";
 import type { Cutoff } from "./domain/cutoff.ts";
 import type { Kilobytes } from "./domain/kilobytes.ts";
+import type * as VitestTemp from "./domain/vitest-temp.ts";
 import type { Inspection } from "./domain/worktree.ts";
 import type {
   ArchiveFailed,
+  NotAVitestTempDir,
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
   ScanFailed,
   SizeUnavailable,
+  TempDirUnreadable,
   WorktreeStatusUnavailable,
 } from "./errors.ts";
 
@@ -115,6 +118,48 @@ export class DiskInventory extends Context.Service<
      * @returns Each worktree, and every directory the search could not read.
      */
     readonly findWorktrees: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
+
+    /**
+     * The temp roots Vitest can have written into on this machine.
+     *
+     * Vitest writes under `os.tmpdir()`, which follows `$TMPDIR` - and that is
+     * not one directory. A shell gets the per-user `/var/folders/…/T`; an agent
+     * harness often sets `/tmp`. Each is resolved to its physical path, so
+     * `/tmp` and `/private/tmp` are one root rather than two that find the same
+     * directories. Best effort: a root that cannot be resolved is left out.
+     *
+     * @returns Each distinct root, physical paths only.
+     */
+    readonly vitestTempRoots: Effect.Effect<ReadonlyArray<string>>;
+
+    /**
+     * Find every directory directly inside a temp root named like a Vitest
+     * project directory.
+     *
+     * The name is a filter, not evidence: a match is a candidate for
+     * `inspectVitestTempDir` and nothing more. The root is resolved to its
+     * physical path first, so a match is named the same however the root was
+     * spelled. A root that does not exist holds no candidates.
+     *
+     * @param root - The temp root to search.
+     * @returns Each candidate, and every directory the search could not read.
+     */
+    readonly findVitestTempCandidates: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
+
+    /**
+     * Establish that a candidate is a Vitest project temp directory, and when
+     * it was last written to.
+     *
+     * A directory that is no longer there is reported as such rather than as a
+     * failure: between a survey and a deletion that is what a finished run
+     * leaves, and it is the outcome the deletion wanted.
+     *
+     * @param path - The candidate to examine.
+     * @returns When it was last written to, or that it is gone.
+     */
+    readonly inspectVitestTempDir: (
+      path: string,
+    ) => Effect.Effect<VitestTemp.Inspection, NotAVitestTempDir | TempDirUnreadable>;
 
     /**
      * Measure a directory's total size.

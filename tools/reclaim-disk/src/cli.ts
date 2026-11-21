@@ -10,12 +10,13 @@
 import { Clock, Console, Effect, Option, Stdio } from "effect";
 import { Command, Flag, Prompt } from "effect/unstable/cli";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { casesHandled } from "./defect.ts";
+import { dirname, join } from "node:path";
+import { casesHandled, shouldNeverHappen } from "./defect.ts";
 import * as Cutoff from "./domain/cutoff.ts";
 import * as Kilobytes from "./domain/kilobytes.ts";
 import { CommandFailed } from "./errors.ts";
 import type * as Plan from "./domain/plan.ts";
+import type * as Worktree from "./domain/worktree.ts";
 import { describe } from "./domain/worktree.ts";
 import { ScanProgress } from "./ports.ts";
 import * as Reclaim from "./reclaim.ts";
@@ -120,6 +121,88 @@ function renderRow(entry: Plan.PlanEntry): string {
   );
 }
 
+/** One line of the report: a single entry, or a run of Vitest temp directories folded into one. */
+type Line =
+  | { readonly _tag: "Single"; readonly entry: Plan.PlanEntry }
+  | { readonly _tag: "Folded"; readonly entries: Worktree.NonEmptyArray<Plan.PlanEntry> };
+
+/**
+ * Lay entries out as report lines, folding Vitest temp directories together.
+ *
+ * A machine running agents leaks thousands of them a day, and a row each would
+ * push everything else in the report off the screen. They are folded by the
+ * three things a reader decides on - where they are, what happens to them, and
+ * why - so nothing a row would have said is lost by folding. Each folded line
+ * sits where its largest member would have, and the entries themselves stay
+ * one per directory, so each is still checked and refused on its own.
+ *
+ * @param entries - The entries, in the order they are to be shown.
+ * @returns One line per entry, or per fold.
+ */
+function lines(entries: ReadonlyArray<Plan.PlanEntry>): ReadonlyArray<Line> {
+  // Each position holds an entry shown on its own, or the key of a fold.
+  const order: Array<Plan.PlanEntry | string> = [];
+  const folds = new Map<string, [Plan.PlanEntry, ...Array<Plan.PlanEntry>]>();
+
+  for (const entry of entries) {
+    if (entry.target._tag !== "VitestTempDir") {
+      order.push(entry);
+      continue;
+    }
+
+    const key = [dirname(entry.target.path), label(entry.disposition), detail(entry)].join("\0");
+    const fold = folds.get(key);
+
+    if (fold === undefined) {
+      folds.set(key, [entry]);
+      order.push(key);
+    } else {
+      fold.push(entry);
+    }
+  }
+
+  return order.map((item): Line => {
+    if (typeof item !== "string") {
+      return { _tag: "Single", entry: item };
+    }
+
+    return {
+      _tag: "Folded",
+      entries: folds.get(item) ?? shouldNeverHappen("every fold key was stored with its fold"),
+    };
+  });
+}
+
+/**
+ * Render one report line.
+ *
+ * @param line - The entry, or the fold, to render.
+ * @returns The formatted row.
+ */
+function renderLine(line: Line): string {
+  switch (line._tag) {
+    case "Single":
+      return renderRow(line.entry);
+
+    case "Folded": {
+      const [first, ...rest] = line.entries;
+
+      if (rest.length === 0) {
+        return renderRow(first);
+      }
+
+      return row(
+        Kilobytes.format(Kilobytes.sum(line.entries.map((entry) => entry.target.size))),
+        label(first.disposition),
+        `${line.entries.length} Vitest temp dirs in ${dirname(first.target.path)}${detail(first)}`,
+      );
+    }
+
+    default:
+      return casesHandled(line);
+  }
+}
+
 /**
  * Render a directory the scan could not examine.
  *
@@ -169,8 +252,8 @@ const reportPlan = Effect.fn("Cli.reportPlan")(function* (plan: Plan.Plan, run: 
   if (plan.reclaiming.length === 0) {
     yield* Console.log("Nothing to reclaim.");
   } else {
-    for (const entry of plan.reclaiming) {
-      yield* Console.log(renderRow(entry));
+    for (const line of lines(plan.reclaiming)) {
+      yield* Console.log(renderLine(line));
     }
   }
 
@@ -185,8 +268,8 @@ const reportPlan = Effect.fn("Cli.reportPlan")(function* (plan: Plan.Plan, run: 
     yield* Console.log("");
     yield* Console.log("Left alone:");
 
-    for (const entry of plan.keeping) {
-      yield* Console.log(renderRow(entry));
+    for (const line of lines(plan.keeping)) {
+      yield* Console.log(renderLine(line));
     }
 
     for (const unexamined of plan.unexamined) {
@@ -266,7 +349,7 @@ const reportOutcome = Effect.fn("Cli.reportOutcome")(function* (outcome: Reclaim
  * @param only - The validated flag value.
  * @returns The corresponding selection.
  */
-function toSelection(only: "all" | "turbo" | "worktrees"): Reclaim.Selection {
+function toSelection(only: "all" | "turbo" | "worktrees" | "vitest"): Reclaim.Selection {
   switch (only) {
     case "all":
       return "all";
@@ -276,6 +359,9 @@ function toSelection(only: "all" | "turbo" | "worktrees"): Reclaim.Selection {
 
     case "worktrees":
       return "worktrees-only";
+
+    case "vitest":
+      return "vitest-only";
 
     default:
       return casesHandled(only);
@@ -377,7 +463,7 @@ const ageFlag = Flag.Int("age").pipe(
   ),
 );
 
-const onlyFlag = Flag.Literals("only", ["all", "turbo", "worktrees"]).pipe(
+const onlyFlag = Flag.Literals("only", ["all", "turbo", "worktrees", "vitest"]).pipe(
   Flag.withDefault("all" as const),
   Flag.withDescription("Which categories to consider."),
 );
@@ -416,6 +502,43 @@ const worktreeRootFlag = Flag.String("worktree-root").pipe(
   Flag.withDescription("Root containing agent worktrees."),
 );
 
+// Repeatable, and replaces the defaults when given, like `--source-root`. The
+// defaults are resolved by the inventory, because where `os.tmpdir()` pointed
+// for the runs that leaked these is a fact about the machine.
+const tempRootFlag = Flag.String("temp-root").pipe(
+  Flag.atLeast(0),
+  Flag.map((given): Reclaim.TempRoots => {
+    const [first, ...rest] = given;
+
+    return first === undefined
+      ? { _tag: "MachineDefaults" }
+      : { _tag: "Given", roots: [first, ...rest] };
+  }),
+  Flag.withDescription(
+    "Temp root searched for leaked Vitest directories. Repeatable; replaces the defaults ($TMPDIR, the per-user temp dir, /private/tmp).",
+  ),
+);
+
+/**
+ * How long a Vitest temp directory must have gone unwritten, by default.
+ *
+ * Long enough that a run still transforming modules is never mistaken for a
+ * dead one; short enough that a day of agents killing test runs does not fill
+ * the disk again before the next sweep.
+ */
+const DEFAULT_TEMP_AGE_HOURS = 1;
+
+const tempAgeFlag = Flag.Int("temp-age").pipe(
+  Flag.withDefault(DEFAULT_TEMP_AGE_HOURS),
+  Flag.filterMap(
+    Cutoff.parseAgeInHours,
+    (hours) => `--temp-age must be a whole number of hours of at least 1, but was ${hours}.`,
+  ),
+  Flag.withDescription(
+    "Only take Vitest temp directories nothing has written to for this many hours.",
+  ),
+);
+
 /**
  * The `reclaim-disk` command.
  *
@@ -431,6 +554,8 @@ export const reclaimDisk = Command.make(
     only: onlyFlag,
     sourceRoots: sourceRootFlag,
     worktreeRoot: worktreeRootFlag,
+    tempRoots: tempRootFlag,
+    tempAge: tempAgeFlag,
   },
   (config) =>
     Effect.gen(function* () {
@@ -440,6 +565,10 @@ export const reclaimDisk = Command.make(
       const options: Reclaim.SurveyOptions = {
         sourceRoots: config.sourceRoots,
         worktreeRoot: config.worktreeRoot,
+        vitestTemp: {
+          roots: config.tempRoots,
+          staleBefore: Cutoff.hoursBefore(now, config.tempAge),
+        },
         selection: toSelection(config.only),
         caches: toCacheDisposition(config.age, now),
       };
@@ -503,6 +632,6 @@ export const reclaimDisk = Command.make(
     }),
 ).pipe(
   Command.withDescription(
-    "Reclaim disk space from regenerable build caches and abandoned agent worktrees.",
+    "Reclaim disk space from regenerable build caches, abandoned agent worktrees, and the temp directories killed Vitest runs leave behind.",
   ),
 );

@@ -106,6 +106,69 @@ export class WorktreeChangedSinceSurvey extends Schema.TaggedError<WorktreeChang
   }
 }
 
+/**
+ * A directory in a temp root is not one Vitest left behind.
+ *
+ * Temp roots are shared by everything on the machine, and a nanoid-shaped name
+ * is shared by more than Vitest - a whole repository checkout among them. So
+ * being Vitest's is parsed from what the directory holds, and everything else
+ * becomes this. A survey drops it without a word, because it was never a
+ * candidate; a deletion that meets it refuses, because it was one a moment ago.
+ */
+export class NotAVitestTempDir extends Schema.TaggedError<NotAVitestTempDir>()(
+  "NotAVitestTempDir",
+  {
+    /** The directory that was examined. */
+    path: Schema.String,
+    /** The first thing about it Vitest would not have produced. */
+    reason: Schema.String,
+  },
+) {
+  /** Names the directory and what disqualified it. */
+  override get message(): string {
+    return `${this.path} is not a Vitest temp directory: ${this.reason}`;
+  }
+}
+
+/** A candidate Vitest temp directory could not be read, so what it holds is unknown. */
+export class TempDirUnreadable extends Schema.TaggedError<TempDirUnreadable>()(
+  "TempDirUnreadable",
+  {
+    /** The directory that could not be read. */
+    path: Schema.String,
+    /** The underlying failure message. */
+    cause: Schema.String,
+  },
+) {
+  /** Names the directory and why it could not be read. */
+  override get message(): string {
+    return `could not read ${this.path}: ${this.cause}`;
+  }
+}
+
+/**
+ * A Vitest temp directory was written to between the survey and its deletion.
+ *
+ * Something is still writing modules into it, which is a Vitest run that is
+ * still going. Deleting it would fail that run, so the entry is refused.
+ */
+export class TempDirWrittenSinceSurvey extends Schema.TaggedError<TempDirWrittenSinceSurvey>()(
+  "TempDirWrittenSinceSurvey",
+  {
+    /** The directory that was left alone. */
+    path: Schema.String,
+    /** When the survey found it last written to. */
+    was: Schema.String,
+    /** When it was last written to now. */
+    now: Schema.String,
+  },
+) {
+  /** Names the directory and both readings of it. */
+  override get message(): string {
+    return `${this.path} was written to since the survey: last written ${this.was}, now ${this.now}`;
+  }
+}
+
 /** Untracked files could not be archived, so the worktree must not be deleted. */
 export class ArchiveFailed extends Schema.TaggedError<ArchiveFailed>()("ArchiveFailed", {
   /** The worktree whose files were being archived. */

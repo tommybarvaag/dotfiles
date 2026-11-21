@@ -18,23 +18,52 @@
  */
 import { Effect, Option } from "effect";
 import { casesHandled } from "./defect.ts";
+import type * as Cutoff from "./domain/cutoff.ts";
 import * as Kilobytes from "./domain/kilobytes.ts";
 import * as Plan from "./domain/plan.ts";
 import * as Worktree from "./domain/worktree.ts";
 import type {
   ArchiveFailed,
+  NotAVitestTempDir,
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
   ScanFailed,
   SizeUnavailable,
+  TempDirUnreadable,
   WorktreeStatusUnavailable,
 } from "./errors.ts";
-import { WorktreeChangedSinceSurvey } from "./errors.ts";
+import { TempDirWrittenSinceSurvey, WorktreeChangedSinceSurvey } from "./errors.ts";
 import { DiskInventory, DiskMutator, type SearchResult } from "./ports.ts";
 
 /** Which categories of target to consider. */
-export type Selection = "all" | "turbo-only" | "worktrees-only";
+export type Selection = "all" | "turbo-only" | "worktrees-only" | "vitest-only";
+
+/**
+ * Where Vitest temp directories are looked for.
+ *
+ * The defaults are a fact about the machine - where `os.tmpdir()` can have
+ * pointed for the runs that leaked them - so the inventory is asked for them
+ * rather than the command line guessing. Given roots replace them.
+ */
+export type TempRoots =
+  | { readonly _tag: "MachineDefaults" }
+  | {
+      readonly _tag: "Given";
+      /** The roots to search instead. */
+      readonly roots: Worktree.NonEmptyArray<string>;
+    };
+
+/** Where Vitest temp directories are looked for, and how old one must be to go. */
+export type VitestTempOptions = {
+  /** The temp roots to search. */
+  readonly roots: TempRoots;
+  /**
+   * The instant, resolved once at the command line, before which a directory
+   * must have been last written to. One written to since is reported and kept.
+   */
+  readonly staleBefore: Cutoff.Cutoff;
+};
 
 /** Where to look and what to consider. */
 export type SurveyOptions = {
@@ -45,6 +74,8 @@ export type SurveyOptions = {
   readonly sourceRoots: ReadonlyArray<string>;
   /** Root containing agent worktrees. */
   readonly worktreeRoot: string;
+  /** Where Vitest temp directories are looked for, and how old one must be to go. */
+  readonly vitestTemp: VitestTempOptions;
   /** Which categories to include. */
   readonly selection: Selection;
   /**
@@ -109,7 +140,12 @@ export type Outcome = {
 const SCAN_CONCURRENCY = 8;
 
 /** Why one directory could not be examined, in the report's words. */
-type ExaminationFailure = SizeUnavailable | WorktreeStatusUnavailable | NotAWorktree;
+type ExaminationFailure =
+  | SizeUnavailable
+  | WorktreeStatusUnavailable
+  | NotAWorktree
+  | NotAVitestTempDir
+  | TempDirUnreadable;
 
 /**
  * Every expected failure this service reports rather than propagates.
@@ -119,7 +155,12 @@ type ExaminationFailure = SizeUnavailable | WorktreeStatusUnavailable | NotAWork
  * surveying or a moment before the delete.
  */
 type Impediment =
-  ExaminationFailure | WorktreeChangedSinceSurvey | ArchiveFailed | RemoveFailed | PruneFailed;
+  | ExaminationFailure
+  | WorktreeChangedSinceSurvey
+  | TempDirWrittenSinceSurvey
+  | ArchiveFailed
+  | RemoveFailed
+  | PruneFailed;
 
 /**
  * An impediment, carrying whatever archive had already been written when it
@@ -191,6 +232,21 @@ function consequenceOf(failure: Impediment): Consequence {
     case "WorktreeChangedSinceSurvey":
       return {
         reason: `changed since the survey: was ${failure.was}, now ${failure.now}`,
+        remains: "Untouched",
+      };
+
+    case "NotAVitestTempDir":
+      return {
+        reason: `no longer a Vitest temp directory: ${failure.reason}`,
+        remains: "Untouched",
+      };
+
+    case "TempDirUnreadable":
+      return { reason: `could not be read: ${failure.cause}`, remains: "Untouched" };
+
+    case "TempDirWrittenSinceSurvey":
+      return {
+        reason: `written to since the survey (last written ${failure.was}, now ${failure.now}); a Vitest run is still using it`,
         remains: "Untouched",
       };
 
@@ -364,6 +420,79 @@ const surveyWorktrees = Effect.fn("Reclaim.surveyWorktrees")(function* (options:
   return [...examined, ...unreadable(found)];
 });
 
+/**
+ * Examine one Vitest temp candidate.
+ *
+ * A candidate the inventory does not recognise is dropped without a row: it
+ * was matched on its name alone, and the temp root is full of other people's
+ * directories, so reporting each one would bury the report in noise about
+ * things this tool never meant to touch. One that is gone is dropped for the
+ * same reason - there is nothing left to say about it. One that could not be
+ * read is a different matter, and is reported like every other directory the
+ * scan could establish nothing about.
+ *
+ * @param path - The candidate.
+ * @returns The target, an unexamined row, or nothing.
+ */
+function examineVitestTempDir(
+  path: string,
+): Effect.Effect<ReadonlyArray<Plan.Scanned>, never, DiskInventory> {
+  return Effect.gen(function* () {
+    const inventory = yield* DiskInventory;
+    const inspection = yield* Effect.catchTag(
+      inventory.inspectVitestTempDir(path),
+      "NotAVitestTempDir",
+      () => Effect.succeed({ _tag: "Absent" } as const),
+    );
+
+    switch (inspection._tag) {
+      case "Absent":
+        return [];
+
+      case "Present": {
+        const size = yield* inventory.sizeOf(path);
+
+        return [
+          {
+            _tag: "Examined",
+            target: { _tag: "VitestTempDir", path, size, lastWritten: inspection.lastWritten },
+          },
+        ] satisfies ReadonlyArray<Plan.Scanned>;
+      }
+
+      default:
+        return casesHandled(inspection);
+    }
+  }).pipe(
+    Effect.catch((failure) =>
+      Effect.succeed<ReadonlyArray<Plan.Scanned>>([
+        { _tag: "Unexamined", path, reason: consequenceOf(failure).reason },
+      ]),
+    ),
+  );
+}
+
+/**
+ * Find and measure every Vitest temp directory beneath the temp roots.
+ *
+ * @param options - The survey options.
+ * @returns One result per recognised directory, and one per unreadable one.
+ */
+const surveyVitestTempDirs = Effect.fn("Reclaim.surveyVitestTempDirs")(function* (
+  options: SurveyOptions,
+) {
+  const inventory = yield* DiskInventory;
+  const { roots } = options.vitestTemp;
+  const searched = roots._tag === "Given" ? roots.roots : yield* inventory.vitestTempRoots;
+  const found = yield* searchEach(searched, inventory.findVitestTempCandidates);
+
+  const examined = yield* Effect.forEach(found.matches, examineVitestTempDir, {
+    concurrency: SCAN_CONCURRENCY,
+  });
+
+  return [...examined.flat(), ...unreadable(found)];
+});
+
 /** One category's scan, as the selection table stores it. */
 type Scan = (
   options: SurveyOptions,
@@ -371,9 +500,10 @@ type Scan = (
 
 /** Which scans each selection runs. */
 const SCANS: Record<Selection, ReadonlyArray<Scan>> = {
-  all: [surveyTurboCaches, surveyWorktrees],
+  all: [surveyTurboCaches, surveyWorktrees, surveyVitestTempDirs],
   "turbo-only": [surveyTurboCaches],
   "worktrees-only": [surveyWorktrees],
+  "vitest-only": [surveyVitestTempDirs],
 };
 
 /**
@@ -396,7 +526,10 @@ export const survey: (
   // reset each other's and interleave their counts into a single garbled line.
   const results = yield* Effect.forEach(SCANS[options.selection], (scan) => scan(options));
 
-  return Plan.make(results.flat(), options.caches);
+  return Plan.make(results.flat(), {
+    caches: options.caches,
+    vitestTempStaleBefore: options.vitestTemp.staleBefore,
+  });
 });
 
 /**
@@ -435,6 +568,37 @@ const stillAsSurveyed = Effect.fn("Reclaim.stillAsSurveyed")(function* (
           now: Worktree.describe(state),
         }),
       );
+    }
+
+    case "VitestTempDir": {
+      const inventory = yield* DiskInventory;
+      const inspection = yield* inventory.inspectVitestTempDir(target.path);
+
+      switch (inspection._tag) {
+        // The run finished and removed its own directory, which is what this
+        // entry was going to do: the removal that follows finds nothing and
+        // succeeds, rather than failing a run over space already freed.
+        case "Absent":
+          return;
+
+        // Equal, not merely still before the cutoff: anything written since
+        // the survey is a run that is still going, however old it looks.
+        case "Present":
+          if (inspection.lastWritten.getTime() === target.lastWritten.getTime()) {
+            return;
+          }
+
+          return yield* Effect.fail(
+            new TempDirWrittenSinceSurvey({
+              path: target.path,
+              was: target.lastWritten.toISOString(),
+              now: inspection.lastWritten.toISOString(),
+            }),
+          );
+
+        default:
+          return casesHandled(inspection);
+      }
     }
 
     default:

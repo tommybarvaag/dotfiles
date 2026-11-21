@@ -22,6 +22,29 @@ const pruneCaches: Plan.CacheDisposition = {
   ),
 };
 
+/** The instant every fixture Vitest temp directory is judged against. */
+const VITEST_STALE_BEFORE = Cutoff.hoursBefore(
+  new Date("2026-03-01T12:00:00Z"),
+  Option.getOrThrow(Cutoff.parseAgeInHours(1)),
+);
+
+/**
+ * A run's policy, with the cache disposition under test.
+ *
+ * @param caches - What the run does with every cache it finds.
+ * @returns The policy.
+ */
+function policy(caches: Plan.CacheDisposition): Plan.Policy {
+  return { caches, vitestTempStaleBefore: VITEST_STALE_BEFORE };
+}
+
+function vitestTempDir(path: string, kb: number, lastWritten: Date): Plan.Scanned {
+  return {
+    _tag: "Examined",
+    target: { _tag: "VitestTempDir", path, size: size(kb), lastWritten },
+  };
+}
+
 function turboCache(path: string, kb: number): Plan.Scanned {
   return { _tag: "Examined", target: { _tag: "TurboCache", path, size: size(kb) } };
 }
@@ -117,7 +140,40 @@ describe("decideWorktree", () => {
   });
 });
 
+describe("decideVitestTempDir", () => {
+  test("a directory last written before the cutoff is deleted", () => {
+    expect(Plan.decideVitestTempDir(new Date("2026-03-01T10:59:59Z"), VITEST_STALE_BEFORE)).toEqual(
+      { _tag: "Delete" },
+    );
+  });
+
+  test("a directory written at or after the cutoff is kept, because a run may still be using it", () => {
+    for (const lastWritten of ["2026-03-01T11:00:00Z", "2026-03-01T11:59:00Z"]) {
+      expect(Plan.decideVitestTempDir(new Date(lastWritten), VITEST_STALE_BEFORE)._tag).toBe(
+        "Keep",
+      );
+    }
+  });
+});
+
 describe("make", () => {
+  test("stale Vitest temp directories are reclaimed and fresh ones are kept", () => {
+    const plan = Plan.make(
+      [
+        vitestTempDir("/tmp/AAAAAAAAAAAAAAAAAAAAA", 500, new Date("2026-02-28T00:00:00Z")),
+        vitestTempDir("/tmp/BBBBBBBBBBBBBBBBBBBBB", 700, new Date("2026-03-01T11:30:00Z")),
+      ],
+      policy(deleteCaches),
+    );
+
+    expect(plan.reclaiming.map((entry) => entry.target.path)).toEqual([
+      "/tmp/AAAAAAAAAAAAAAAAAAAAA",
+    ]);
+    expect(plan.keeping.map((entry) => entry.target.path)).toEqual(["/tmp/BBBBBBBBBBBBBBBBBBBBB"]);
+    expect(plan.reclaimable).toBe(size(500));
+    expect(plan.pruning).toEqual([]);
+  });
+
   test("a cache inside a removed worktree is dropped, and one inside a kept worktree is not", () => {
     const plan = Plan.make(
       [
@@ -128,7 +184,7 @@ describe("make", () => {
         // Shares a prefix with a removed worktree without being inside it.
         turboCache("/w/app/gone-too/.turbo/cache", 200),
       ],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     expect(plan.reclaiming.map((entry) => entry.target.path)).toEqual([
@@ -140,7 +196,7 @@ describe("make", () => {
   });
 
   test("turbo caches are always reclaimable", () => {
-    const plan = Plan.make([turboCache("/a/.turbo/cache", 1024)], deleteCaches);
+    const plan = Plan.make([turboCache("/a/.turbo/cache", 1024)], policy(deleteCaches));
 
     expect(plan.reclaiming).toHaveLength(1);
     expect(plan.keeping).toHaveLength(0);
@@ -148,7 +204,7 @@ describe("make", () => {
   });
 
   test("a cache carries the resolved cutoff rather than the option it came from", () => {
-    const plan = Plan.make([turboCache("/a/.turbo/cache", 1024)], pruneCaches);
+    const plan = Plan.make([turboCache("/a/.turbo/cache", 1024)], policy(pruneCaches));
 
     // Acting on this entry needs nothing but the entry: the cutoff travelled
     // with it, so a confirmation prompt left open across midnight cannot make
@@ -162,7 +218,7 @@ describe("make", () => {
         turboCache("/a/.turbo/cache", 100),
         worktree("/w/dirty", 900, { _tag: "TrackedDirty", entries: [" M a.ts"] }),
       ],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     expect(plan.reclaiming).toHaveLength(1);
@@ -174,7 +230,7 @@ describe("make", () => {
   test("untracked-only worktrees are reclaimable and counted", () => {
     const plan = Plan.make(
       [worktree("/w/untracked", 500, { _tag: "UntrackedOnly", files: ["plans/"], ignored: [] })],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     expect(plan.reclaiming[0]?.disposition._tag).toBe("ArchiveThenDelete");
@@ -182,7 +238,7 @@ describe("make", () => {
   });
 
   test("empty targets are dropped", () => {
-    const plan = Plan.make([turboCache("/empty", 0)], deleteCaches);
+    const plan = Plan.make([turboCache("/empty", 0)], policy(deleteCaches));
 
     expect(plan.reclaiming).toHaveLength(0);
     expect(plan.keeping).toHaveLength(0);
@@ -191,7 +247,7 @@ describe("make", () => {
   test("entries are ordered largest first", () => {
     const plan = Plan.make(
       [turboCache("/small", 10), turboCache("/big", 9000), turboCache("/mid", 500)],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     expect(plan.reclaiming.map((entry) => entry.target.path)).toEqual(["/big", "/mid", "/small"]);
@@ -200,7 +256,7 @@ describe("make", () => {
   test("a directory that could not be examined is carried, and never reclaimed", () => {
     const plan = Plan.make(
       [unexamined("/w/app/stray", "could not be inspected: not a git repository")],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     expect(plan.unexamined).toEqual([
@@ -228,7 +284,7 @@ describe("pruning", () => {
         ),
         worktree("/w/api/agent-1", 700, { _tag: "Clean" }, "/src/api"),
       ],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     // Each owner once, however many of its worktrees go.
@@ -246,14 +302,16 @@ describe("pruning", () => {
           "/src/bystander",
         ),
       ],
-      deleteCaches,
+      policy(deleteCaches),
     );
 
     expect(plan.pruning).toEqual(["/src/app"]);
   });
 
   test("a plan that removes no worktree prunes nothing", () => {
-    expect(Plan.make([turboCache("/a/.turbo/cache", 1024)], deleteCaches).pruning).toEqual([]);
+    expect(Plan.make([turboCache("/a/.turbo/cache", 1024)], policy(deleteCaches)).pruning).toEqual(
+      [],
+    );
   });
 });
 

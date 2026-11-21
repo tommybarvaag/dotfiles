@@ -29,6 +29,7 @@ import {
   createRepository,
   createTempTree,
   createTurboCache,
+  createVitestTempDir,
   encloseInRepository,
   exists,
   frozenClockAt,
@@ -36,6 +37,7 @@ import {
   listFiles,
   removeTempTree,
   runOrThrow,
+  sha1,
   type TempTree,
   worktreeRegistrations,
   writeBlob,
@@ -55,6 +57,18 @@ const ONLY_COPY = "the only copy of this\n";
 
 /** What a run with no `--age` does with every cache it finds. */
 const deleteCaches: Plan.CacheDisposition = { _tag: "Delete" };
+
+/**
+ * Resolve the default Vitest grace the way the command line does.
+ *
+ * Against the real clock rather than `RUN_AT`, because the fixtures are
+ * backdated from the real clock too.
+ *
+ * @returns The instant one hour ago.
+ */
+function vitestStaleBefore(): Cutoff.Cutoff {
+  return Cutoff.hoursBefore(new Date(), Option.getOrThrow(Cutoff.parseAgeInHours(1)));
+}
 
 /** The instant every applying run's clock is stopped at. */
 const RUN_AT = new Date("2026-03-01T12:00:00Z");
@@ -103,6 +117,10 @@ function surveying(
   return {
     sourceRoots,
     worktreeRoot: tree.worktreeRoot,
+    vitestTemp: {
+      roots: { _tag: "Given", roots: [tree.tempRoot] },
+      staleBefore: vitestStaleBefore(),
+    },
     selection,
     caches,
   };
@@ -725,5 +743,139 @@ describe("apply", () => {
     await apply(plan);
 
     expect(only(await listFiles(cache))).toContain(join("fresh", "artifact.bin"));
+  });
+});
+
+/**
+ * Every path a plan names, whichever section it is in.
+ *
+ * @param plan - The plan to read.
+ * @returns Each path the report would print.
+ */
+function named(plan: Plan.Plan): ReadonlyArray<string> {
+  return [
+    ...plan.reclaiming.map((entry) => entry.target.path),
+    ...plan.keeping.map((entry) => entry.target.path),
+    ...plan.unexamined.map((entry) => entry.path),
+  ];
+}
+
+describe("Vitest temp directories", () => {
+  /** A stale project directory, as a killed run leaves one. */
+  const STALE = "Cjkj_H4LKz5PpUh7WCbX1";
+
+  /** A project directory a run wrote into minutes ago. */
+  const FRESH = "8712f0Ev63ntQifCOeFFS";
+
+  test("a stale one is removed, a fresh one is kept, and nothing that only looks like one is touched", async () => {
+    const stale = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2, client: 1 });
+    const fresh = await createVitestTempDir(tree.tempRoot, FRESH, 0, { ssr: 2 });
+
+    // Each of these sat in a real temp root beside Vitest's directories.
+    const checkout = join(tree.tempRoot, "toast-review-ha6vdvqk");
+    await mkdir(join(checkout, "packages"), { recursive: true });
+    await writeFile(join(checkout, "package.json"), "{}\n");
+
+    const logs = join(tree.tempRoot, "cursor-agent-logs-501");
+    await mkdir(logs);
+    await writeBlob(join(logs, "latest.log"), 1);
+
+    const lookalike = await createVitestTempDir(tree.tempRoot, "AAAAAAAAAAAAAAAAAAAAA", 3, {
+      ssr: 2,
+    });
+    await writeBlob(join(lookalike, "ssr", "notes.md"), 2);
+
+    const empty = join(tree.tempRoot, "EEEEEEEEEEEEEEEEEEEEE");
+    await mkdir(join(empty, "ssr"), { recursive: true });
+
+    const plan = await survey(surveying("vitest-only", deleteCaches));
+
+    expect(only(plan.reclaiming).target.path).toBe(stale);
+    expect(only(plan.keeping).target.path).toBe(fresh);
+    expect(plan.unexamined).toEqual([]);
+
+    for (const decoy of [checkout, logs, lookalike, empty]) {
+      expect(named(plan)).not.toContain(decoy);
+    }
+
+    const outcome = await apply(plan);
+
+    expect(outcome.refused).toEqual([]);
+    expect(outcome.removed).toBe(1);
+    expect(await exists(stale)).toBe(false);
+
+    const survivors = [fresh, checkout, logs, lookalike, empty];
+
+    expect(await Promise.all(survivors.map((survivor) => exists(survivor)))).toEqual(
+      survivors.map(() => true),
+    );
+  });
+
+  test("one written to between the survey and the deletion is refused and survives", async () => {
+    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
+
+    const plan = await survey(surveying("vitest-only", deleteCaches));
+
+    expect(only(plan.reclaiming).target.path).toBe(project);
+
+    // A run that is still going transforms another module.
+    await writeBlob(join(project, "ssr", sha1("a module transformed just now")), 3);
+
+    const outcome = await apply(plan);
+
+    expect(await exists(project)).toBe(true);
+    expect(outcome.removed).toBe(0);
+    expect(only(outcome.refused).path).toBe(project);
+    expect(only(outcome.refused).remains).toBe("Untouched");
+  });
+
+  test("one its run removed before the deletion reached it counts as done, not refused", async () => {
+    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
+
+    const plan = await survey(surveying("vitest-only", deleteCaches));
+
+    // The run closed cleanly and cleared its own directory.
+    await rm(project, { recursive: true });
+
+    const outcome = await apply(plan);
+
+    expect(outcome.refused).toEqual([]);
+    expect(outcome.removed).toBe(1);
+  });
+
+  test("a root reached by two spellings, as /tmp and /private/tmp are, is searched once", async () => {
+    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
+    const link = join(tree.root, "tmp-link");
+    await symlink(tree.tempRoot, link);
+
+    const plan = await survey({
+      ...surveying("vitest-only", deleteCaches),
+      vitestTemp: {
+        roots: { _tag: "Given", roots: [link, tree.tempRoot] },
+        staleBefore: vitestStaleBefore(),
+      },
+    });
+
+    expect(only(plan.reclaiming).target.path).toBe(project);
+
+    const outcome = await apply(plan);
+
+    expect(outcome.refused).toEqual([]);
+    expect(await exists(project)).toBe(false);
+  });
+
+  test("a temp root that does not exist holds nothing, and the other categories still report", async () => {
+    const repository = await createRepository(tree, "app");
+    const cache = await createTurboCache(repository, [{ name: "old", ageInDays: 90 }]);
+
+    const plan = await survey({
+      ...surveying("all", deleteCaches),
+      vitestTemp: {
+        roots: { _tag: "Given", roots: [join(tree.root, "never-created")] },
+        staleBefore: vitestStaleBefore(),
+      },
+    });
+
+    expect(only(plan.reclaiming).target.path).toBe(cache);
   });
 });

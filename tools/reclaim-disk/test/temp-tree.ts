@@ -44,6 +44,8 @@ export type TempTree = {
   readonly sourceRoot: string;
   /** The root the worktree scan is pointed at. */
   readonly worktreeRoot: string;
+  /** The temp root the Vitest scan is pointed at, standing in for `$TMPDIR`. */
+  readonly tempRoot: string;
   /** The directory the mutator under test writes archives into. */
   readonly archiveRoot: string;
 };
@@ -95,10 +97,11 @@ export async function createTempTree(): Promise<TempTree> {
     root,
     sourceRoot: join(root, "src"),
     worktreeRoot: join(root, "worktrees"),
+    tempRoot: join(root, "tmp"),
     archiveRoot: join(root, "archives"),
   };
 
-  await Promise.all([mkdir(tree.sourceRoot), mkdir(tree.worktreeRoot)]);
+  await Promise.all([mkdir(tree.sourceRoot), mkdir(tree.worktreeRoot), mkdir(tree.tempRoot)]);
 
   return tree;
 }
@@ -255,6 +258,62 @@ export async function createTurboCache(
   );
 
   return cache;
+}
+
+/** Milliseconds in an hour, for backdating Vitest temp directories. */
+const HOUR = 60 * 60 * 1000;
+
+/**
+ * Lay out a directory the way a killed Vitest run leaves one.
+ *
+ * `<root>/<nanoid>/<environment>/<sha1>`: a project directory named with 21
+ * nanoid characters, holding one directory per environment, each holding the
+ * transformed modules named by the SHA-1 of their ids.
+ *
+ * @param root - The temp root to create it in.
+ * @param name - The project directory's name.
+ * @param ageInHours - How long ago anything was last written into it.
+ * @param environments - Each environment and how many modules it holds.
+ * @returns The project directory's absolute path.
+ */
+export async function createVitestTempDir(
+  root: string,
+  name: string,
+  ageInHours: number,
+  environments: Readonly<Record<string, number>>,
+): Promise<string> {
+  const project = join(root, name);
+  const when = new Date(Date.now() - ageInHours * HOUR);
+
+  await Promise.all(
+    Object.entries(environments).map(async ([environment, modules]) => {
+      const directory = join(project, environment);
+      await mkdir(directory, { recursive: true });
+
+      await Promise.all(
+        Array.from({ length: modules }, (_, index) =>
+          writeBlob(join(directory, sha1(`${name}/${environment}/${index}`)), index),
+        ),
+      );
+
+      // Backdated last, because writing a module touches its directory.
+      await utimes(directory, when, when);
+    }),
+  );
+
+  await utimes(project, when, when);
+
+  return project;
+}
+
+/**
+ * The SHA-1 of a string in lowercase hex, which is how Vitest names a module file.
+ *
+ * @param text - The text to hash.
+ * @returns Forty hex characters.
+ */
+export function sha1(text: string): string {
+  return new Bun.CryptoHasher("sha1").update(text).digest("hex");
 }
 
 /**

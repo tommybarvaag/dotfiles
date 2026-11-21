@@ -1,0 +1,175 @@
+/**
+ * What a directory in a temp root has to look like to count as one Vitest
+ * leaked.
+ *
+ * Vitest gives every project of every run a directory `<tmpdir>/<nanoid>/`,
+ * writes each transformed module into `<environment>/<sha1 of its id>` beneath
+ * it, and removes the directory only when the run closes cleanly. A run that is
+ * killed instead - an agent's timeout, a Ctrl+C, a crashed worker - leaves it
+ * behind, and with dozens of agents running tests that is a hundred gigabytes a
+ * day.
+ *
+ * The name alone proves nothing. A temp root is shared by everything on the
+ * machine, and 21 characters from the nanoid alphabet is also what
+ * `cursor-agent-logs-501` and `toast-review-ha6vdvqk` are - the second one a
+ * whole repository checkout. So a directory is recognised by positive evidence
+ * about everything it holds, and anything the rule does not explain disqualifies
+ * it: the error is always toward leaving a directory alone.
+ *
+ * The environment directory names are not checked. Vitest joins
+ * `environment.name`, which is `ssr` for the default pool but whatever a
+ * project's environment is called otherwise.
+ */
+
+/** Length of the nanoid Vitest names a project's temp directory with. */
+const PROJECT_NAME_LENGTH = 21;
+
+/** Exactly the nanoid default alphabet, at exactly its default length. */
+const PROJECT_NAME = new RegExp(`^[A-Za-z0-9_-]{${PROJECT_NAME_LENGTH}}$`, "u");
+
+/** A module file is named by the SHA-1 of the module's id, in lowercase hex. */
+const MODULE_FILE_NAME = /^[0-9a-f]{40}$/u;
+
+/**
+ * What kind of filesystem entry a listing found, symlinks not followed.
+ *
+ * `Other` covers symlinks, sockets, and everything else: none of them is
+ * anything Vitest writes, so each one disqualifies the directory holding it.
+ */
+export type EntryKind = "Directory" | "File" | "Other";
+
+/** One entry inside an environment directory. */
+export type ModuleEntry = {
+  /** The entry's name. */
+  readonly name: string;
+  /** What it is. */
+  readonly kind: EntryKind;
+};
+
+/**
+ * One entry directly inside a candidate directory.
+ *
+ * Only a directory is listed further, because a candidate holding anything
+ * else is already disqualified and there is nothing more to learn by reading it.
+ */
+export type ProjectEntry =
+  | {
+      readonly kind: "Directory";
+      /** The environment's name, such as `ssr`. */
+      readonly name: string;
+      /** When the directory last gained or lost an entry, which is when Vitest last wrote a module. */
+      readonly modified: Date;
+      /** What it holds. */
+      readonly entries: ReadonlyArray<ModuleEntry>;
+    }
+  | {
+      readonly kind: "File" | "Other";
+      /** The entry's name. */
+      readonly name: string;
+    };
+
+/** Everything recognising a candidate needs to know about it, read in one pass. */
+export type ProjectListing = {
+  /** The candidate's own name. */
+  readonly name: string;
+  /** When the candidate itself last gained or lost an entry. */
+  readonly modified: Date;
+  /** What it holds. */
+  readonly entries: ReadonlyArray<ProjectEntry>;
+};
+
+/** What recognising a candidate established. */
+export type Recognition =
+  | {
+      readonly _tag: "Recognised";
+      /**
+       * The latest instant anything was written into it.
+       *
+       * Taken from the environment directories as well as the candidate: a
+       * new module lands in `<id>/ssr/`, which moves the mtime of `ssr` and
+       * leaves the candidate's own at the moment `ssr` was created.
+       */
+      readonly lastWritten: Date;
+    }
+  | {
+      readonly _tag: "Unrecognised";
+      /** The first thing about it that Vitest would not have produced. */
+      readonly reason: string;
+    };
+
+/** What reading one candidate from the disk established. */
+export type Inspection =
+  | {
+      readonly _tag: "Present";
+      /** The latest instant anything was written into it. */
+      readonly lastWritten: Date;
+    }
+  | {
+      /**
+       * Nothing is there. Between a survey and the deletion that is the usual
+       * fate of a directory Vitest was still using: the run finished and
+       * cleaned up after itself, which is the outcome this tool wanted anyway.
+       */
+      readonly _tag: "Absent";
+    };
+
+/**
+ * Whether a name is worth reading the directory for.
+ *
+ * A cheap filter on the walk, never evidence: `recognise` decides.
+ *
+ * @param name - A directory name directly inside a temp root.
+ * @returns `true` when the name is shaped like the nanoid Vitest uses.
+ */
+export function isCandidateName(name: string): boolean {
+  return PROJECT_NAME.test(name);
+}
+
+/**
+ * Decide whether a listed directory is a Vitest project temp directory.
+ *
+ * Every entry has to be accounted for: the candidate holds only directories,
+ * each of those holds only regular files named by a SHA-1, and there is at
+ * least one such file. A single README, symlink, nested directory, or file with
+ * any other name means something other than Vitest put it there.
+ *
+ * @param listing - What the candidate holds, symlinks not followed.
+ * @returns When it was last written to, or why it is not one.
+ */
+export function recognise(listing: ProjectListing): Recognition {
+  if (!isCandidateName(listing.name)) {
+    return { _tag: "Unrecognised", reason: "not named like a Vitest project directory" };
+  }
+
+  let modules = 0;
+  let lastWritten = listing.modified;
+
+  for (const entry of listing.entries) {
+    if (entry.kind !== "Directory") {
+      return { _tag: "Unrecognised", reason: `holds ${entry.name}, which is not a directory` };
+    }
+
+    for (const module of entry.entries) {
+      if (module.kind !== "File" || !MODULE_FILE_NAME.test(module.name)) {
+        return {
+          _tag: "Unrecognised",
+          reason: `${entry.name}/${module.name} is not a transformed module`,
+        };
+      }
+    }
+
+    modules += entry.entries.length;
+
+    if (entry.modified.getTime() > lastWritten.getTime()) {
+      lastWritten = entry.modified;
+    }
+  }
+
+  // An empty directory is evidence of nothing, so it is left alone. It costs
+  // a few kilobytes, which is not worth a guess.
+  if (modules === 0) {
+    return { _tag: "Unrecognised", reason: "holds no transformed modules" };
+  }
+
+  return { _tag: "Recognised", lastWritten };
+}

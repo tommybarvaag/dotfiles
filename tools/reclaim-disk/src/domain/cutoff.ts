@@ -1,5 +1,6 @@
 /**
- * How old a turbo cache entry must be before this tool will delete it.
+ * How old a turbo cache entry, or a Vitest temp directory, must be before this
+ * tool will delete it.
  *
  * A day count is a moving target: resolved at the start of a run it names one
  * set of entries, resolved a minute later it names another. So `--age 30` is
@@ -58,6 +59,45 @@ export function parseAgeInDays(value: number): Option.Option<AgeInDays> {
 export function before(now: Date, age: AgeInDays): Cutoff {
   // SAFETY: TypeScript cannot express the brand. `age` is at least one day by construction, so the result lies strictly before `now`, which is the whole Cutoff invariant.
   return new Date(now.getTime() - age * DAY) as Cutoff;
+}
+
+declare const AgeInHoursBrand: unique symbol;
+
+/** A whole number of hours, one or more. */
+export type AgeInHours = number & { readonly [AgeInHoursBrand]: true };
+
+/** Milliseconds in an hour. */
+const HOUR = 60 * 60 * 1000;
+
+/**
+ * Parse an age in hours from an untrusted number.
+ *
+ * The same rule as days, for the same reason: a zero or negative age would
+ * resolve to a cutoff every Vitest temp directory predates, including the one
+ * a run is writing into right now.
+ *
+ * @param value - The candidate number of hours.
+ * @returns The branded age, or `None` when the value is not a positive whole number of hours.
+ */
+export function parseAgeInHours(value: number): Option.Option<AgeInHours> {
+  if (!Number.isInteger(value) || value < 1) {
+    return Option.none();
+  }
+
+  // SAFETY: TypeScript cannot express the brand. The guard above proved the value is a whole number of at least one hour, which is the whole AgeInHours invariant, and this parser is the only way to brand a number as one.
+  return Option.some(value as AgeInHours);
+}
+
+/**
+ * Resolve an age in hours into the instant that many hours before a starting point.
+ *
+ * @param now - The instant the run started.
+ * @param age - How many hours before `now` the cutoff falls.
+ * @returns The resolved cutoff.
+ */
+export function hoursBefore(now: Date, age: AgeInHours): Cutoff {
+  // SAFETY: TypeScript cannot express the brand. `age` is at least one hour by construction, so the result lies strictly before `now`, which is the whole Cutoff invariant.
+  return new Date(now.getTime() - age * HOUR) as Cutoff;
 }
 
 /**

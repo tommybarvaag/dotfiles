@@ -8,20 +8,25 @@
  * escape this module.
  */
 import { Clock, Effect, Layer, Semaphore } from "effect";
-import { mkdir, readdir, realpath, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import type { Dirent } from "node:fs";
+import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { casesHandled } from "../defect.ts";
 import * as Cutoff from "../domain/cutoff.ts";
 import * as Kilobytes from "../domain/kilobytes.ts";
+import * as VitestTemp from "../domain/vitest-temp.ts";
 import * as Worktree from "../domain/worktree.ts";
 import {
   ArchiveFailed,
   messageOf,
+  NotAVitestTempDir,
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
   ScanFailed,
   SizeUnavailable,
+  TempDirUnreadable,
   WorktreeStatusUnavailable,
 } from "../errors.ts";
 import { DiskInventory, DiskMutator, ScanProgress, type SearchResult } from "../ports.ts";
@@ -261,6 +266,18 @@ const TURBO_CACHE_DIRECTORY = "cache";
 /** Agent worktrees sit one level under a per-repository grouping. */
 const WORKTREE_DEPTH = 2;
 
+/** Vitest's project directories sit directly inside the temp root. */
+const VITEST_TEMP_DEPTH = 1;
+
+/** What the Vitest search is looking for, in the progress line's words. */
+const VITEST_LOOKING_FOR = "Vitest temp dirs";
+
+/**
+ * The machine-wide temp directory, which agent harnesses commonly hand their
+ * children as `$TMPDIR`. Its physical path, because `/tmp` is a symlink to it.
+ */
+const SHARED_TEMP = "/private/tmp";
+
 /** A search that established nothing: no matches, nothing skipped. */
 const NOTHING_FOUND: SearchResult = { matches: [], skipped: [] };
 
@@ -499,6 +516,81 @@ async function childDirectories(directory: string): Promise<ReadonlyArray<string
 }
 
 /**
+ * Name the kind of a directory entry, without following a symlink.
+ *
+ * @param entry - The entry `readdir` returned with its file type.
+ * @returns What it is.
+ */
+function kindOf(entry: Dirent): VitestTemp.EntryKind {
+  if (entry.isDirectory()) {
+    return "Directory";
+  }
+
+  return entry.isFile() ? "File" : "Other";
+}
+
+/**
+ * List a directory's entries with their kinds.
+ *
+ * @param directory - The directory to list.
+ * @returns Every entry and what it is.
+ */
+async function listKinds(directory: string): Promise<ReadonlyArray<VitestTemp.ModuleEntry>> {
+  const entries = await readdir(directory, { withFileTypes: true });
+
+  return entries.map((entry) => ({ name: entry.name, kind: kindOf(entry) }));
+}
+
+/** What reading a Vitest temp candidate off the disk produced, before it is recognised. */
+type CandidateRead =
+  | { readonly _tag: "Listed"; readonly listing: VitestTemp.ProjectListing }
+  | { readonly _tag: "NotADirectory" }
+  | { readonly _tag: "Absent" };
+
+/**
+ * Read everything recognising a Vitest temp candidate needs, in one pass.
+ *
+ * A path that vanishes partway through - the candidate itself or one of its
+ * environment directories - is reported as absent: that is a run finishing
+ * and removing its own directory, which is what this tool was going to do.
+ *
+ * @param path - The candidate.
+ * @returns The listing, or why there is none to recognise.
+ */
+async function readCandidate(path: string): Promise<CandidateRead> {
+  try {
+    const [info, children] = await Promise.all([lstat(path), listKinds(path)]);
+
+    // Seen only when something replaced the directory with a link after the
+    // walk found it, since the walk never yields one.
+    if (!info.isDirectory()) {
+      return { _tag: "NotADirectory" };
+    }
+
+    const entries = await Promise.all(
+      children.map(async (child): Promise<VitestTemp.ProjectEntry> => {
+        if (child.kind !== "Directory") {
+          return { kind: child.kind, name: child.name };
+        }
+
+        const environment = join(path, child.name);
+        const [modified, modules] = await Promise.all([lstat(environment), listKinds(environment)]);
+
+        return { kind: "Directory", name: child.name, modified: modified.mtime, entries: modules };
+      }),
+    );
+
+    return { _tag: "Listed", listing: { name: basename(path), modified: info.mtime, entries } };
+  } catch (cause) {
+    if (ABSENT_CODES.has(errorCodeOf(cause))) {
+      return { _tag: "Absent" };
+    }
+
+    throw cause;
+  }
+}
+
+/**
  * Parse what git said about a directory into an inspection, or refuse it.
  *
  * This is the one place the tool turns a candidate directory into the claim
@@ -609,6 +701,76 @@ export const DiskInventoryLive = Layer.effect(
           maxDepth: WORKTREE_DEPTH,
           matches: ({ depth }) => depth === WORKTREE_DEPTH,
         }),
+
+      vitestTempRoots: Effect.promise(async () => {
+        // `getconf` answers with the per-user temp directory whatever `$TMPDIR`
+        // says, which is where a shell's test runs put the bulk of them.
+        const perUser = await capture("getconf", ["DARWIN_USER_TEMP_DIR"], "");
+        const spelled = [
+          ...(perUser._tag === "Succeeded" ? [perUser.stdout.trim()] : []),
+          tmpdir(),
+          SHARED_TEMP,
+        ].filter((path) => path !== "");
+
+        const physical = await Promise.all(
+          spelled.map((path) =>
+            realpath(path).then(
+              (resolved) => [resolved],
+              () => [],
+            ),
+          ),
+        );
+
+        return [...new Set(physical.flat())];
+      }),
+
+      findVitestTempCandidates: (root) =>
+        Effect.matchEffect(
+          Effect.tryPromise({ try: () => realpath(root), catch: classifyListingFailure }),
+          {
+            onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> =>
+              failure._tag === "Absent"
+                ? Effect.succeed(NOTHING_FOUND)
+                : Effect.fail(
+                    new ScanFailed({ root, lookingFor: VITEST_LOOKING_FOR, cause: failure.reason }),
+                  ),
+            onSuccess: (resolved) =>
+              walk(progress, {
+                root: resolved,
+                lookingFor: VITEST_LOOKING_FOR,
+                maxDepth: VITEST_TEMP_DEPTH,
+                matches: ({ name }) => VitestTemp.isCandidateName(name),
+              }),
+          },
+        ),
+
+      inspectVitestTempDir: (path) =>
+        Effect.flatMap(
+          Effect.tryPromise({
+            try: () => readCandidate(path),
+            catch: (cause) => new TempDirUnreadable({ path, cause: messageOf(cause) }),
+          }),
+          (read): Effect.Effect<VitestTemp.Inspection, NotAVitestTempDir> => {
+            switch (read._tag) {
+              case "Absent":
+                return Effect.succeed({ _tag: "Absent" });
+
+              case "NotADirectory":
+                return Effect.fail(new NotAVitestTempDir({ path, reason: "not a directory" }));
+
+              case "Listed": {
+                const recognition = VitestTemp.recognise(read.listing);
+
+                return recognition._tag === "Recognised"
+                  ? Effect.succeed({ _tag: "Present", lastWritten: recognition.lastWritten })
+                  : Effect.fail(new NotAVitestTempDir({ path, reason: recognition.reason }));
+              }
+
+              default:
+                return casesHandled(read);
+            }
+          },
+        ),
 
       sizeOf: (path) => measure(path, "du", ["-sk", path]),
 
