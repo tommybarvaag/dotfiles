@@ -1,0 +1,36 @@
+name: reclaim-disk
+
+on:
+  pull_request:
+    paths:
+      - tools/reclaim-disk/**
+      - .github/workflows/reclaim-disk.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/reclaim-disk/**
+      - .github/workflows/reclaim-disk.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reclaim-disk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # macOS only: the tool reads `getconf DARWIN_USER_TEMP_DIR` and
+    # /System/Volumes/Data, and its tests drive real git, tar, du and find.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tools/reclaim-disk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+      - run: bun run check

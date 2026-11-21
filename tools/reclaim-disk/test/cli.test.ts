@@ -16,6 +16,7 @@ import {
   createRepository,
   createTempTree,
   createTurboCache,
+  createVitestTempDir,
   removeTempTree,
   type TempTree,
 } from "./temp-tree.ts";
@@ -81,6 +82,9 @@ describe("reclaim-disk", () => {
       tree.sourceRoot,
       "--worktree-root",
       join(tree.root, "never-created"),
+      // Pinned, so the test never reads the machine's real temp directories.
+      "--temp-root",
+      tree.tempRoot,
     ]);
 
     expect(run.exitCode).toBe(0);
@@ -137,5 +141,38 @@ describe("reclaim-disk", () => {
     expect(run.exitCode).toBe(1);
     expect(run.stdout).toContain(`partially removed: ${cache}`);
     expect(run.stdout).not.toContain(`refused: ${cache}`);
+  });
+
+  test("leaked Vitest temp directories are reported as one folded row per root", async () => {
+    await Promise.all(
+      ["Cjkj_H4LKz5PpUh7WCbX1", "8712f0Ev63ntQifCOeFFS", "26e_6HxJm-MUfa5uzRh75"].map((name) =>
+        createVitestTempDir(tree.tempRoot, name, 3, { ssr: 2 }),
+      ),
+    );
+
+    const run = await reclaimDisk(["--only", "vitest", "--temp-root", tree.tempRoot]);
+
+    expect(run.exitCode).toBe(0);
+    const folded = run.stdout.split("\n").find((line) => line.includes("Vitest temp dirs"));
+
+    expect(folded).toContain("delete");
+    expect(folded?.endsWith(`3 Vitest temp dirs in ${tree.tempRoot}`)).toBe(true);
+    expect(run.stdout).not.toContain("Cjkj_H4LKz5PpUh7WCbX1");
+  });
+
+  test("a --temp-age below one hour is refused before anything is scanned", async () => {
+    const run = await reclaimDisk([
+      "--only",
+      "vitest",
+      "--temp-root",
+      tree.tempRoot,
+      "--temp-age",
+      "0",
+    ]);
+
+    expect(run.exitCode).not.toBe(0);
+    expect(run.stdout + run.stderr).toContain(
+      "--temp-age must be a whole number of hours between 1 and 87600, but was 0.",
+    );
   });
 });

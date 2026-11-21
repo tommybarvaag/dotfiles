@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Effect, Layer, Option } from "effect";
-import { chmod, mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DiskInventoryLive } from "../src/adapters/bun-disk.ts";
@@ -45,8 +45,22 @@ function inventory<A, E>(
   );
 }
 
+/**
+ * Make a fresh directory under the system temp root, by its physical path.
+ *
+ * The finders name what they find physically, and `tmpdir()` is itself behind
+ * a symlink on macOS (`/var` is `/private/var`), so a fixture compared against
+ * a match has to be spelled the same way.
+ *
+ * @param prefix - The directory name's prefix, as `mkdtemp` takes it.
+ * @returns The new directory's physical path.
+ */
+async function scratch(prefix: string): Promise<string> {
+  return realpath(await mkdtemp(prefix));
+}
+
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "reclaim-disk-test-"));
+  root = await scratch(join(tmpdir(), "reclaim-disk-test-"));
 
   const cache = join(root, "repo", ".turbo", "cache");
   await mkdir(join(cache, "old-entry"), { recursive: true });
@@ -73,14 +87,14 @@ afterAll(async () => {
 
 describe("DiskInventoryLive", () => {
   test("finds .turbo/cache under a root, and never a .turbo without one", async () => {
-    const found = await inventory((service) => service.findTurboCaches(root));
+    const found = await inventory((service) => service.findTurboCaches([root]));
 
     expect(found.matches).toEqual([join(root, "repo", ".turbo", "cache")]);
     expect(found.skipped).toEqual([]);
   });
 
   test("a directory it cannot descend into is reported rather than skipped in silence", async () => {
-    const tree = await mkdtemp(join(tmpdir(), "reclaim-disk-denied-"));
+    const tree = await scratch(join(tmpdir(), "reclaim-disk-denied-"));
 
     try {
       // One readable repository, and one whose intermediate directory hides a
@@ -92,7 +106,7 @@ describe("DiskInventoryLive", () => {
       await mkdir(join(locked, "repo", ".turbo", "cache"), { recursive: true });
       await chmod(locked, 0o000);
 
-      const found = await inventory((service) => service.findTurboCaches(tree));
+      const found = await inventory((service) => service.findTurboCaches([tree]));
 
       expect(found.matches).toEqual([join(tree, "open", "repo", ".turbo", "cache")]);
       expect(found.skipped).toHaveLength(1);
@@ -113,18 +127,37 @@ describe("DiskInventoryLive", () => {
   });
 
   test("a root that exists and cannot be read ends the scan", async () => {
-    const tree = await mkdtemp(join(tmpdir(), "reclaim-disk-unreadable-root-"));
+    const tree = await scratch(join(tmpdir(), "reclaim-disk-unreadable-root-"));
 
     try {
       await chmod(tree, 0o000);
 
-      const failure = await inventory((service) => Effect.flip(service.findTurboCaches(tree)));
+      const failure = await inventory((service) => Effect.flip(service.findTurboCaches([tree])));
 
       expect(failure._tag).toBe("ScanFailed");
       expect(failure.root).toBe(tree);
       expect(failure.message).toContain(`could not scan ${tree} looking for build caches`);
     } finally {
       await chmod(tree, 0o755);
+      await rm(tree, { recursive: true, force: true });
+    }
+  });
+
+  test("a root that cannot be read is named as the caller spelled it, not as it resolved", async () => {
+    const tree = await scratch(join(tmpdir(), "reclaim-disk-spelled-root-"));
+    const locked = join(tree, "locked");
+    const link = join(tree, "link");
+
+    try {
+      await mkdir(locked);
+      await symlink(locked, link);
+      await chmod(locked, 0o000);
+
+      const failure = await inventory((service) => Effect.flip(service.findTurboCaches([link])));
+
+      expect(failure.root).toBe(link);
+    } finally {
+      await chmod(locked, 0o755);
       await rm(tree, { recursive: true, force: true });
     }
   });
@@ -150,10 +183,11 @@ describe("DiskInventoryLive", () => {
   test("reports zero when no entry predates the cutoff", async () => {
     const cache = join(root, "repo", ".turbo", "cache");
 
-    // Ten years, not a century: macOS `find` cannot parse a pre-1970 date and
-    // exits non-zero, which is now a reported failure rather than a silent zero.
+    // The oldest age `--age` accepts. macOS `find` cannot parse a pre-1970
+    // date and exits non-zero, so this also proves the bound keeps every
+    // accepted cutoff inside what `find` can be handed.
     const stale = await inventory((service) =>
-      service.sizeOfStaleEntries(cache, staleBefore(3_650)),
+      service.sizeOfStaleEntries(cache, staleBefore(Cutoff.MAX_AGE_IN_DAYS)),
     );
 
     expect(stale).toBe(Kilobytes.zero);
@@ -178,7 +212,7 @@ describe("DiskInventoryLive", () => {
   });
 
   test("selects entries on the cutoff instant, not the calendar day it falls on", async () => {
-    const cache = await mkdtemp(join(tmpdir(), "reclaim-disk-instant-"));
+    const cache = await scratch(join(tmpdir(), "reclaim-disk-instant-"));
 
     try {
       // The cutoff falls late in the UTC day, so truncating it to `2026-09-15`
@@ -215,10 +249,10 @@ describe("DiskInventoryLive", () => {
   });
 
   test("a directory that is not a repository yields no turbo caches", async () => {
-    const empty = await mkdtemp(join(tmpdir(), "reclaim-disk-empty-"));
+    const empty = await scratch(join(tmpdir(), "reclaim-disk-empty-"));
 
     try {
-      expect(await inventory((service) => service.findTurboCaches(empty))).toEqual({
+      expect(await inventory((service) => service.findTurboCaches([empty]))).toEqual({
         matches: [],
         skipped: [],
       });

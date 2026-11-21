@@ -1,7 +1,8 @@
 # reclaim-disk
 
-Reclaims disk space from two things that grow without bound and are never
-collected: Turbo's local build cache, and abandoned agent worktrees.
+Reclaims disk space from three things that grow without bound and are never
+collected: Turbo's local build cache, abandoned agent worktrees, and the temp
+directories killed Vitest runs leave behind.
 
 Dry run by default. Nothing is deleted without `--apply`.
 
@@ -11,6 +12,9 @@ reclaim-disk --apply              # act on the report, after confirming
 reclaim-disk --apply --yes        # skip the confirmation (required in scripts)
 reclaim-disk --age 30 --apply     # keep the last 30 days of turbo cache
 reclaim-disk --only turbo         # caches only
+reclaim-disk --only vitest        # leaked Vitest temp directories only
+reclaim-disk --temp-age 6         # leave Vitest temp dirs written to in the last 6 hours
+reclaim-disk --source-root ~/_src --source-root ~/fuse   # scan these instead of the defaults
 reclaim-disk --help
 ```
 
@@ -18,6 +22,27 @@ On a terminal the scan repaints a single status line as directories are found
 and measured, and `--apply` asks for confirmation before deleting. Piped or in
 CI it emits neither — output is the report alone, with no escape sequences —
 and `--apply` without `--yes` refuses rather than deleting unattended.
+
+Turbo caches are looked for under `~/src` and `~/.t3` by default; `~/.t3` is
+where T3 Code keeps its agent worktrees, each with a `.turbo/cache` of its own.
+`--source-root` is repeatable and replaces the defaults when given. Every root
+is resolved to its physical path before it is walked, and two spellings of one
+root are walked once. Roots may nest, and a cache reached from more than one is
+planned once. A cache inside a worktree the same run removes is left to that
+removal rather than planned twice — and because both are named by their
+physical paths, that holds even when a source root reaches the worktree root
+through a symlink.
+
+Vitest temp directories are looked for in every place `os.tmpdir()` can have
+pointed for the runs that leaked them: `$TMPDIR`, the per-user `/var/folders/…/T`
+that `getconf DARWIN_USER_TEMP_DIR` names whatever `$TMPDIR` says, and
+`/private/tmp`, which agent harnesses often hand their children. They are handed
+to the same walk as any `--temp-root`, which resolves each to its physical path,
+so `/tmp` and `/private/tmp` are searched once; a default that does not exist is
+skipped, and one that exists and cannot be read fails the scan like any other
+root.
+`--temp-root` is repeatable and replaces the defaults when given. The report
+folds them into one row per root, because a busy machine leaks thousands a day.
 
 ## Why it is shaped this way
 
@@ -29,6 +54,52 @@ rebuilding. Agent worktrees are worse: each is a full checkout with its own
 Both are safe to delete _in general_ and dangerous to delete _blindly_, because
 an abandoned worktree occasionally holds the only copy of something. The tool
 is built around that distinction.
+
+Vitest is the third. Every project of every run gets `<tmpdir>/<nanoid>/`, each
+transformed module is written into `<environment>/<sha1 of its id>` beneath it,
+and the directory is removed only when the run closes cleanly. A run that is
+killed instead — an agent's timeout, a Ctrl+C, a crashed worker — leaves it
+behind, at 50–220 MB a time. With dozens of agents running tests that came to
+over 400 GB in a few days, all of it in a temp directory nothing ever empties.
+
+## Leaked Vitest temp directories
+
+The temp root is shared by everything on the machine, and the name proves
+nothing: `cursor-agent-logs-501` and `toast-review-ha6vdvqk` are 21 nanoid
+characters too, and the second is a whole repository checkout. So a directory
+is taken only on positive evidence about everything it holds
+(`domain/vitest-temp.ts`): it holds only directories, each of those holds only
+regular files named by a SHA-1, and there is at least one. A single README,
+symlink, nested directory or differently-named file means something other than
+Vitest put it there, and the directory is not even reported — it was never a
+candidate. A file directly inside it settles that before any of its
+subdirectories is read, so a 21-character checkout holding an unreadable
+directory beside its `package.json` is dropped, not reported as unreadable.
+The subdirectories are then read one at a time, and the first that rules the
+directory out settles it the same way: one that cannot be read is reported only
+when nothing else it holds disqualified it.
+
+A recognised directory is deleted only when nothing has been written into it
+for `--temp-age` hours (default 1). A run that is still going keeps writing
+modules into it and reads them back by path, so deleting it would fail the run.
+Staleness is taken from the environment directories as well as the project
+directory, because a new module moves the mtime of `ssr/` and leaves its parent
+alone. One written to recently is reported under "Left alone".
+
+Immediately before each deletion the directory is read again, `lstat` first and
+the listing only after it. If anything was written into it since the survey it
+is refused, because that is a run still in progress. If it is no longer a
+directory Vitest could have left — a regular file, a symlink, a dangling one, or
+an environment directory turned into a link — it is refused too, and left
+exactly as it is. Only `lstat` finding nothing at the path means it is gone: its
+run finished and cleaned up after itself, which counts as done, not as a
+refusal, and nothing is removed — whatever appears at that path afterwards is
+not what the survey found.
+
+The trade-off: nothing in the directory says whether its run is alive, and mtime
+cannot see a watch-mode session that has sat idle past the cutoff. That session
+loses its directory and its next re-run fails. Nothing is lost — every file in
+it is a regenerated transform — but raise `--temp-age` while one is open.
 
 ## Safety
 
@@ -163,28 +234,35 @@ midnight, so a cutoff truncated to its day is enforced hours from the instant
 that was resolved — earlier east of UTC, and later west of it, where the run
 would delete entries the report said it would keep.
 
-`--age` must be a whole number of days of at least 1, rejected at the flag
+`--age` must be a whole number of days between 1 and 3650, rejected at the flag
 otherwise. A negative age would resolve to a cutoff in the future, which every
 entry predates — the run would empty the whole cache under a report promising
-stale entries only.
+stale entries only. The ceiling is ten years because an unbounded age is not
+merely silly: large enough, it resolves to a `Date` that is no instant at all,
+and well before that it reaches past 1970, which `find -newermt` cannot parse.
+`--temp-age` is bounded the same way, at 87600 hours.
 
 ## Structure
 
 The layout follows the repo coding standards: a pure functional core, an
 application service that sequences effects through narrow ports, and a single
-adapter holding every subprocess call.
+adapter holding every subprocess call, beside the two filesystem readers it
+drives.
 
 ```
 src/
   domain/               pure, no I/O
     kilobytes.ts        branded size type, parsing, formatting
-    cutoff.ts           --age parsed to a positive whole number of days, resolved to an instant
+    cutoff.ts           --age / --temp-age parsed to bounded whole days / hours, resolved to an instant
     worktree.ts         WorktreeState - what a working tree holds, ignored paths included
+    vitest-temp.ts      what a temp directory must hold to be one Vitest leaked
     plan.ts             targets, dispositions, what is regenerable, plan construction, totals
   ports.ts              DiskInventory (read), DiskMutator (write), ScanProgress (report)
   reclaim.ts            the application service: survey / apply
   adapters/
-    bun-disk.ts         the tree walk, du, df, git, tar
+    bun-disk.ts         the live inventory and mutator: du, df, git, tar, and the finders
+    tree-walk.ts        the bounded in-process directory walk every finder runs
+    vitest-temp-reader.ts  the lstat-first read of a Vitest temp candidate
     terminal-progress.ts  the status line, and the silent implementations
   cli.ts                flags, confirmation, report rendering
   main.ts               composition root
@@ -229,8 +307,11 @@ real behaviour change: a vendored package shipping a populated `.turbo/cache`
 would now be missed. It was verified against this machine's tree that pruning
 returns an identical cache list.
 
-Both finders are that one walk, driven by a `Search`: a root, a depth limit,
-and a rule deciding whether a directory is a result. Pruning is consulted only
+Every finder is that one walk, driven by a `Search`: its roots, a depth limit,
+and a rule deciding whether a directory is a result. The roots are resolved to
+their physical paths and deduplicated before anything is walked, so every path
+a search returns is physical, and the progress line is told once per search —
+its counts run across every root rather than restarting at each. Pruning is consulted only
 after that rule, so a search can never be defeated by a name it is itself
 looking for. Matches are reported as they are found, and a match is exactly
 what the finder returns: the cache scan matches `cache` inside `.turbo` rather
@@ -314,8 +395,14 @@ bun run format     # prettier --write, the whole package
 bun run lint       # oxlint
 bun run typecheck  # tsc --noEmit
 bun test
+bun run check      # all of the above, fail-fast: exactly what CI runs
 bun run src/main.ts --help
 ```
+
+`bun run check` is the one command to run before pushing: `prettier --check`,
+then lint, typecheck and tests, stopping at the first failure. CI runs the same
+command on macOS from `.github/workflows/reclaim-disk.yml`, on every pull
+request and push to `main` that touches this package.
 
 Prettier and oxlint are scoped to this package — `.prettierrc.json` and
 `.oxlintrc.json` live here, not at the root of the dotfiles repo, so nothing
@@ -347,8 +434,10 @@ as zero, and that stale entries are selected on the cutoff _instant_ rather
 than the calendar day it falls on.
 
 The destructive half — `survey` and `apply` over the live inventory and the
-live mutator — is covered in `test/reclaim.test.ts`, which asserts what survived
-rather than what was called:
+live mutator — is covered in `test/reclaim.test.ts`, with the Vitest temp
+directory cases in `test/reclaim-vitest.test.ts` over the same harness
+(`test/reclaim-harness.ts`). Both assert what survived rather than what was
+called:
 
 - a survey that plans two deletions leaves every file on disk untouched;
 - an untracked-only worktree is removed only after an archive that really holds
@@ -382,7 +471,25 @@ rather than what was called:
   deleted in the same run;
 - `--only turbo` removes the cache and leaves worktrees and their registrations
   alone;
-- a pruned cache loses exactly the entries the survey measured.
+- a pruned cache loses exactly the entries the survey measured;
+- a stale Vitest temp directory is removed and a fresh one kept, while a
+  21-character repository checkout, a 21-character log directory, a look-alike
+  holding one non-hash file and an empty one all survive unreported;
+- a Vitest temp directory written into between the survey and the delete is
+  refused and survives, and one its own run removed first counts as done;
+- one replaced before the delete by a regular file, a dangling symlink or a
+  symlink to a directory, or whose environment directory became a symlink, is
+  refused and is still there afterwards — the first two used to read as gone
+  and be removed;
+- a 21-character checkout holding a `package.json` beside an unreadable
+  directory produces no row at all, and neither does one holding only
+  directories, where a README in one disqualifies it and another cannot be read;
+- a temp root that exists and cannot be read fails the scan, naming it;
+- a temp root reached by two spellings, as `/tmp` and `/private/tmp` are, is
+  walked once;
+- a source root reached by two spellings plans its cache once, and one that
+  reaches the worktree root through a symlink still leaves a cache inside a
+  removed worktree to that removal, under `--age` as well.
 
 The command line is covered in `test/cli.test.ts` by spawning the real
 entrypoint with stdin closed, which is the only way to assert what a user and a
@@ -392,12 +499,16 @@ shell actually get:
 - a scan root that exists and cannot be read prints one `error:` line on stderr
   — one line, not a cause block — and exits 1;
 - `--apply` with nobody to ask refuses and exits non-zero;
-- a target left half-removed prints `partially removed:`, never `refused:`.
+- a target left half-removed prints `partially removed:`, never `refused:`;
+- leaked Vitest temp directories print as one folded row per root;
+- a `--temp-age` below one hour is refused at the flag, naming the bounds.
 
 `DiskInventoryLive` additionally covers the walk's answers to an unreadable
 directory: one it cannot descend into comes back as a reported skip beside the
 matches, a root that does not exist yields nothing, and a root that exists and
-cannot be read is a `ScanFailed` naming it.
+cannot be read is a `ScanFailed` naming it as it was given, symlink and all.
+The progress line is driven through the live inventory over two roots, and its
+counts are shown to carry from one root to the next.
 
 Two seams make that possible without a mock. The mutator is built with the
 directory it archives into (`makeDiskMutator`), so a test run writes into its

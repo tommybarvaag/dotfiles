@@ -106,6 +106,69 @@ export class WorktreeChangedSinceSurvey extends Schema.TaggedError<WorktreeChang
   }
 }
 
+/**
+ * A planned Vitest temp directory is no longer one Vitest left behind.
+ *
+ * Temp roots are shared by everything on the machine, and a nanoid-shaped name
+ * is shared by more than Vitest - a whole repository checkout among them. So
+ * being Vitest's is parsed from what the directory holds. A survey drops an
+ * unrecognised one without a word, because it was never a candidate; a
+ * deletion that meets one refuses with this, because it was one a moment ago.
+ */
+export class NotAVitestTempDir extends Schema.TaggedError<NotAVitestTempDir>()(
+  "NotAVitestTempDir",
+  {
+    /** The directory that was examined. */
+    path: Schema.String,
+    /** The first thing about it Vitest would not have produced. */
+    reason: Schema.String,
+  },
+) {
+  /** Names the directory and what disqualified it. */
+  override get message(): string {
+    return `${this.path} is not a Vitest temp directory: ${this.reason}`;
+  }
+}
+
+/** A candidate Vitest temp directory could not be read, so what it holds is unknown. */
+export class TempDirUnreadable extends Schema.TaggedError<TempDirUnreadable>()(
+  "TempDirUnreadable",
+  {
+    /** The directory that could not be read. */
+    path: Schema.String,
+    /** The underlying failure message. */
+    cause: Schema.String,
+  },
+) {
+  /** Names the directory and why it could not be read. */
+  override get message(): string {
+    return `could not read ${this.path}: ${this.cause}`;
+  }
+}
+
+/**
+ * A Vitest temp directory was written to between the survey and its deletion.
+ *
+ * Something is still writing modules into it, which is a Vitest run that is
+ * still going. Deleting it would fail that run, so the entry is refused.
+ */
+export class TempDirWrittenSinceSurvey extends Schema.TaggedError<TempDirWrittenSinceSurvey>()(
+  "TempDirWrittenSinceSurvey",
+  {
+    /** The directory that was left alone. */
+    path: Schema.String,
+    /** When the survey found it last written to. */
+    was: Schema.String,
+    /** When it was last written to now. */
+    now: Schema.String,
+  },
+) {
+  /** Names the directory and both readings of it. */
+  override get message(): string {
+    return `${this.path} was written to since the survey: last written ${this.was}, now ${this.now}`;
+  }
+}
+
 /** Untracked files could not be archived, so the worktree must not be deleted. */
 export class ArchiveFailed extends Schema.TaggedError<ArchiveFailed>()("ArchiveFailed", {
   /** The worktree whose files were being archived. */
@@ -189,4 +252,25 @@ export class CommandFailed extends Schema.TaggedError<CommandFailed>()("CommandF
  */
 export function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * Read the `code` a Node filesystem error carries, if it carries one.
+ *
+ * Both filesystem readers classify by it - the walk to decide whether an
+ * unlistable directory is absent, denied, or unusable, and the Vitest temp
+ * reader to tell a directory that vanished from one that was replaced - so it
+ * sits beside `messageOf` rather than in either of them.
+ *
+ * @param cause - The value a filesystem call rejected with.
+ * @returns The error code, or an empty string when there is none.
+ */
+export function errorCodeOf(cause: unknown): string {
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) {
+    return "";
+  }
+
+  const { code } = cause;
+
+  return typeof code === "string" ? code : "";
 }

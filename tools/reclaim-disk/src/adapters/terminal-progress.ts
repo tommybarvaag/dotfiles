@@ -70,9 +70,10 @@ export const ScanProgressLive = Layer.effect(
     );
 
     return ScanProgress.of({
-      scanning: (lookingFor, root) =>
+      // Once per search, so the counts run across every root it covers.
+      scanning: (lookingFor, roots) =>
         Effect.flatMap(
-          Ref.set(counts, { ...initialCounts, lookingFor, latest: root }),
+          Ref.set(counts, { ...initialCounts, lookingFor, latest: roots.join(", ") }),
           () => repaint,
         ),
 

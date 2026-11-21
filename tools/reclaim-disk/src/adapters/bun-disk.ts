@@ -5,14 +5,16 @@
  * invoked directly rather than through a shell, so no path needs quoting and a
  * directory named with a space or a quote cannot change what runs. Raw exit
  * codes and stderr are translated into the tool's typed errors and never
- * escape this module.
+ * escape this module. The two filesystem readers the inventory drives - the
+ * directory walk and the Vitest temp reader - spawn nothing and live beside it.
  */
-import { Clock, Effect, Layer, Semaphore } from "effect";
-import { mkdir, readdir, realpath, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { Clock, Effect, Layer } from "effect";
+import { mkdir, realpath, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import * as Cutoff from "../domain/cutoff.ts";
 import * as Kilobytes from "../domain/kilobytes.ts";
+import * as VitestTemp from "../domain/vitest-temp.ts";
 import * as Worktree from "../domain/worktree.ts";
 import {
   ArchiveFailed,
@@ -20,11 +22,13 @@ import {
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
-  ScanFailed,
   SizeUnavailable,
+  TempDirUnreadable,
   WorktreeStatusUnavailable,
 } from "../errors.ts";
-import { DiskInventory, DiskMutator, ScanProgress, type SearchResult } from "../ports.ts";
+import { DiskInventory, DiskMutator, ScanProgress, type TempRoots } from "../ports.ts";
+import { type Candidate, UNBOUNDED_DEPTH, walk } from "./tree-walk.ts";
+import { readCandidate } from "./vitest-temp-reader.ts";
 
 /** Encodes what a command reads on its standard input, built once. */
 const ENCODER = new TextEncoder();
@@ -218,40 +222,6 @@ function sumDuOutput(
   );
 }
 
-/** A dependency tree, which holds no build cache this tool owns. */
-const NODE_MODULES = "node_modules";
-
-/** A repository's git database. */
-const GIT_DIRECTORY = ".git";
-
-/**
- * Directory names the scans never descend into.
- *
- * A dependency tree holds hundreds of thousands of directories and no build
- * cache this tool owns, so walking it dominated the scan while contributing
- * nothing. A repository's git database holds neither a cache nor a worktree.
- * Exported so the exclusion is reviewable rather than buried.
- *
- * The trade-off: a vendored package shipping a populated `.turbo/cache` would
- * now be missed. That has not been observed, and the cost of looking is the
- * whole latency problem.
- */
-export const PRUNED_DIRECTORIES: ReadonlySet<string> = new Set([NODE_MODULES, GIT_DIRECTORY]);
-
-/** Depth limit meaning "no limit". */
-const UNBOUNDED_DEPTH = Number.MAX_SAFE_INTEGER;
-
-/**
- * How many directories the walk lists at once, across the whole traversal.
- *
- * One number, not one per level: the bound is a semaphore held around each
- * `readdir`, and the per-level `forEach` is unbounded. Bounding each level
- * instead would bound nothing, because every level descends into another
- * bounded `forEach` and the limits compound - 16 siblings at a time, five
- * levels deep, is a million listings in flight rather than sixteen.
- */
-const WALK_CONCURRENCY = 16;
-
 /** The directory Turbo writes its cache under. */
 const TURBO_DIRECTORY = ".turbo";
 
@@ -261,98 +231,14 @@ const TURBO_CACHE_DIRECTORY = "cache";
 /** Agent worktrees sit one level under a per-repository grouping. */
 const WORKTREE_DEPTH = 2;
 
-/** A search that established nothing: no matches, nothing skipped. */
-const NOTHING_FOUND: SearchResult = { matches: [], skipped: [] };
-
-/** A directory the walk reached, offered to a search's match rule. */
-type Candidate = {
-  /** The directory's own name. */
-  readonly name: string;
-  /** Absolute path of the directory holding it. */
-  readonly parent: string;
-  /** Its depth beneath the search root, counting the root's children as 1. */
-  readonly depth: number;
-};
+/** Vitest's project directories sit directly inside the temp root. */
+const VITEST_TEMP_DEPTH = 1;
 
 /**
- * One directory search.
- *
- * Both finders are the same traversal — collect the directories a rule picks
- * out, never descend into one that was picked, and stop at a depth — so what
- * differs between them is data rather than two functions.
+ * The machine-wide temp directory, which agent harnesses commonly hand their
+ * children as `$TMPDIR`. Its physical path, because `/tmp` is a symlink to it.
  */
-type Search = {
-  /** The directory to search. */
-  readonly root: string;
-  /** What is being looked for, in human terms, for progress and failures. */
-  readonly lookingFor: string;
-  /** Deepest level a match may be found at, counting the root's children as 1. Never below 1. */
-  readonly maxDepth: number;
-  /** Whether a directory is a result. A match is collected and never descended into. */
-  readonly matches: (candidate: Candidate) => boolean;
-};
-
-/**
- * Why a directory could not be listed, classified by what the walk should do.
- *
- * - `Absent` - there is no directory there. At a root that means the category
- *   is simply empty on this machine; deeper it means something moved while the
- *   walk was running.
- * - `Denied` - it is there and this process may not read it. An unprivileged
- *   sweep of a home directory always hits some.
- * - `Unusable` - the machine could not answer at all: out of descriptors, out
- *   of memory, an I/O error. Nothing about such a scan is trustworthy, so it is
- *   the one classification that ends the search rather than annotating it.
- */
-type ListingFailure = {
-  /** Which of the three kinds of failure this is. */
-  readonly _tag: "Absent" | "Denied" | "Unusable";
-  /** The underlying failure message. */
-  readonly reason: string;
-};
-
-/** Error codes meaning there is no directory at that path to list. */
-const ABSENT_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR"]);
-
-/** Error codes meaning the directory is there and unreadable by this process. */
-const DENIED_CODES: ReadonlySet<string> = new Set(["EACCES", "EPERM"]);
-
-/**
- * Read the `code` a Node filesystem error carries, if it carries one.
- *
- * @param cause - The value `readdir` rejected with.
- * @returns The error code, or an empty string when there is none.
- */
-function errorCodeOf(cause: unknown): string {
-  if (typeof cause !== "object" || cause === null || !("code" in cause)) {
-    return "";
-  }
-
-  const { code } = cause;
-
-  return typeof code === "string" ? code : "";
-}
-
-/**
- * Classify a failed directory listing.
- *
- * @param cause - The value `readdir` rejected with.
- * @returns What kind of failure it was, and its message.
- */
-function classifyListingFailure(cause: unknown): ListingFailure {
-  const reason = messageOf(cause);
-  const code = errorCodeOf(cause);
-
-  if (ABSENT_CODES.has(code)) {
-    return { _tag: "Absent", reason };
-  }
-
-  if (DENIED_CODES.has(code)) {
-    return { _tag: "Denied", reason };
-  }
-
-  return { _tag: "Unusable", reason };
-}
+const SHARED_TEMP = "/private/tmp";
 
 /**
  * Whether a directory is a Turbo cache: `cache`, directly inside `.turbo`.
@@ -369,133 +255,31 @@ function isTurboCache({ name, parent }: Candidate): boolean {
 }
 
 /**
- * Combine the results of searching several subtrees.
+ * Spell out the temp roots a search covers.
  *
- * @param results - One result per subtree.
- * @returns Every match and every skipped directory, in encounter order.
+ * The defaults are where `os.tmpdir()` can have pointed for the runs that
+ * leaked these directories: the per-user temp directory `getconf` names
+ * whatever `$TMPDIR` says, which is where a shell's test runs put the bulk of
+ * them; this process's own `$TMPDIR`; and the machine-wide one agent harnesses
+ * hand their children. They are only spelled here. Resolving and deduplicating
+ * them is the walk's, as for every other search, so a default that does not
+ * exist is skipped and one that cannot be read fails the scan like any root.
+ *
+ * @param roots - The roots the caller asked for.
+ * @returns The roots to walk, as spelled.
  */
-function mergeResults(results: ReadonlyArray<SearchResult>): SearchResult {
-  return {
-    matches: results.flatMap((result) => result.matches),
-    skipped: results.flatMap((result) => result.skipped),
-  };
-}
+function spellTempRoots(roots: TempRoots): Effect.Effect<ReadonlyArray<string>> {
+  if (roots._tag === "Given") {
+    return Effect.succeed(roots.roots);
+  }
 
-/**
- * Walk a tree in process, reporting each match the instant it is found.
- *
- * Replaces a spawned `find`. The subprocess was not merely slower: its output
- * was read with a single await on the whole stream, so matches it had already
- * printed could not be shown until it exited. Walking in process removes the
- * pipe, which is what makes incremental reporting possible at all.
- *
- * Semantics deliberately match `find(1)` as it was invoked before:
- * - a matched directory is not descended into, as `-prune` did;
- * - symlinks are not followed, as the absence of `-L` did, so no cycle guard
- *   is needed.
- *
- * An unreadable subdirectory does not end the scan, but it does not disappear
- * either: it comes back under `skipped`, which the survey turns into a reported
- * row like any other directory it could not establish anything about.
- *
- * A root that does not exist yields nothing rather than failing. Both roots are
- * defaulted, so "the caller was asked to scan somewhere that does not exist" is
- * usually "this machine has never run an agent" - and that must not take the
- * other category's report down with it. A root that exists and cannot be read
- * is still a `ScanFailed`, as is any listing the machine could not answer.
- *
- * @param progress - Where each match is reported as it is discovered.
- * @param search - What to look for, where, and how deep.
- * @returns Every matching path, and every directory that could not be read.
- */
-function walk(
-  progress: ScanProgress["Service"],
-  search: Search,
-): Effect.Effect<SearchResult, ScanFailed> {
-  return Effect.gen(function* () {
-    yield* progress.scanning(search.lookingFor, search.root);
-
-    // The single bound on the whole traversal. Acquired around the listing
-    // only, never held across the recursion beneath it, so it cannot deadlock.
-    const listings = yield* Semaphore.make(WALK_CONCURRENCY);
-
-    const list = (directory: string): Effect.Effect<ReadonlyArray<string>, ListingFailure> =>
-      Semaphore.withPermit(listings)(
-        Effect.tryPromise({
-          try: () => childDirectories(directory),
-          catch: classifyListingFailure,
-        }),
-      );
-
-    const scanFailed = (cause: string): ScanFailed =>
-      new ScanFailed({ root: search.root, lookingFor: search.lookingFor, cause });
-
-    function descend(path: string, depth: number): Effect.Effect<SearchResult, ScanFailed> {
-      return Effect.matchEffect(list(path), {
-        onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> =>
-          failure._tag === "Unusable"
-            ? Effect.fail(scanFailed(`${path}: ${failure.reason}`))
-            : Effect.succeed({
-                matches: [],
-                skipped: [{ path, reason: `could not be listed: ${failure.reason}` }],
-              }),
-        onSuccess: (children) => visit(path, depth, children),
-      });
-    }
-
-    function visit(
-      directory: string,
-      depth: number,
-      children: ReadonlyArray<string>,
-    ): Effect.Effect<SearchResult, ScanFailed> {
-      return Effect.map(
-        Effect.forEach(
-          children,
-          (name): Effect.Effect<SearchResult, ScanFailed> => {
-            const childDepth = depth + 1;
-            const path = join(directory, name);
-
-            if (search.matches({ name, parent: directory, depth: childDepth })) {
-              return Effect.as(progress.found(path), { matches: [path], skipped: [] });
-            }
-
-            // Pruning is consulted only after `matches`, so a search can never
-            // be defeated by a name it is itself looking for.
-            if (childDepth >= search.maxDepth || PRUNED_DIRECTORIES.has(name)) {
-              return Effect.succeed(NOTHING_FOUND);
-            }
-
-            return descend(path, childDepth);
-          },
-          { concurrency: "unbounded" },
-        ),
-        mergeResults,
-      );
-    }
-
-    return yield* Effect.matchEffect(list(search.root), {
-      onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> =>
-        failure._tag === "Absent"
-          ? Effect.succeed(NOTHING_FOUND)
-          : Effect.fail(scanFailed(failure.reason)),
-      onSuccess: (children) => visit(search.root, 0, children),
-    });
-  });
-}
-
-/**
- * List a directory's immediate subdirectories, rejecting when it cannot be read.
- *
- * `readdir` with file types reports a symlink as a link rather than a
- * directory, so filtering on `isDirectory` also excludes symlinks.
- *
- * @param directory - The directory to list.
- * @returns The subdirectory names.
- */
-async function childDirectories(directory: string): Promise<ReadonlyArray<string>> {
-  const entries = await readdir(directory, { withFileTypes: true });
-
-  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  return Effect.map(
+    Effect.promise(() => capture("getconf", ["DARWIN_USER_TEMP_DIR"], "")),
+    (perUser) =>
+      [perUser._tag === "Succeeded" ? perUser.stdout.trim() : "", tmpdir(), SHARED_TEMP].filter(
+        (path) => path !== "",
+      ),
+  );
 }
 
 /**
@@ -594,9 +378,9 @@ export const DiskInventoryLive = Layer.effect(
       );
 
     return DiskInventory.of({
-      findTurboCaches: (root) =>
+      findTurboCaches: (roots) =>
         walk(progress, {
-          root,
+          roots,
           lookingFor: "build caches",
           maxDepth: UNBOUNDED_DEPTH,
           matches: isTurboCache,
@@ -604,10 +388,26 @@ export const DiskInventoryLive = Layer.effect(
 
       findWorktrees: (root) =>
         walk(progress, {
-          root,
+          roots: [root],
           lookingFor: "agent worktrees",
           maxDepth: WORKTREE_DEPTH,
           matches: ({ depth }) => depth === WORKTREE_DEPTH,
+        }),
+
+      findVitestTempCandidates: (roots) =>
+        Effect.flatMap(spellTempRoots(roots), (spelled) =>
+          walk(progress, {
+            roots: spelled,
+            lookingFor: "Vitest temp dirs",
+            maxDepth: VITEST_TEMP_DEPTH,
+            matches: ({ name }) => VitestTemp.isCandidateName(name),
+          }),
+        ),
+
+      inspectVitestTempDir: (path) =>
+        Effect.tryPromise({
+          try: () => readCandidate(path),
+          catch: (cause) => new TempDirUnreadable({ path, cause: messageOf(cause) }),
         }),
 
       sizeOf: (path) => measure(path, "du", ["-sk", path]),

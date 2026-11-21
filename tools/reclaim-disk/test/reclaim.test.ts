@@ -8,18 +8,24 @@
  * substitute cannot prove the thing worth proving - that when archiving fails
  * for a reason the filesystem produced, the worktree is still there afterwards.
  *
- * Each test asserts what survived, not that a function was called.
+ * Each test asserts what survived, not that a function was called. The Vitest
+ * temp directory suite is `reclaim-vitest.test.ts`, over the same harness.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { Clock, Effect, Layer, Option } from "effect";
+import { Effect, Option } from "effect";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { DiskInventoryLive, makeDiskMutator } from "../src/adapters/bun-disk.ts";
-import { ScanProgressSilent } from "../src/adapters/terminal-progress.ts";
-import * as Cutoff from "../src/domain/cutoff.ts";
 import type * as Plan from "../src/domain/plan.ts";
-import { type DiskInventory, DiskMutator } from "../src/ports.ts";
-import * as Reclaim from "../src/reclaim.ts";
+import { DiskMutator } from "../src/ports.ts";
+import {
+  bindToTree,
+  deleteCaches,
+  only,
+  pruneOlderThan,
+  refusal,
+  survey,
+  surveyRecording,
+} from "./reclaim-harness.ts";
 import {
   addStaleRegistration,
   addWorktree,
@@ -31,7 +37,6 @@ import {
   createTurboCache,
   encloseInRepository,
   exists,
-  frozenClockAt,
   ignorePaths,
   listFiles,
   removeTempTree,
@@ -41,23 +46,8 @@ import {
   writeBlob,
 } from "./temp-tree.ts";
 
-/**
- * The read-only half of the machine, with progress suppressed.
- *
- * `survey` is run with nothing else in scope: no mutating capability exists in
- * its context, so "the survey deleted something" is not a failure this suite
- * has to catch - it is a program that would not compile.
- */
-const Inventory = Layer.provide(DiskInventoryLive, ScanProgressSilent);
-
 /** Text written into a worktree and never committed, standing in for the only copy of something. */
 const ONLY_COPY = "the only copy of this\n";
-
-/** What a run with no `--age` does with every cache it finds. */
-const deleteCaches: Plan.CacheDisposition = { _tag: "Delete" };
-
-/** The instant every applying run's clock is stopped at. */
-const RUN_AT = new Date("2026-03-01T12:00:00Z");
 
 let tree: TempTree;
 
@@ -69,111 +59,7 @@ afterEach(async () => {
   await removeTempTree(tree);
 });
 
-/**
- * The single element of a collection, failing the test when there is not exactly one.
- *
- * @template A - The element type.
- * @param values - The collection to unwrap.
- * @returns Its only element.
- * @throws When the collection does not hold exactly one element.
- */
-function only<A>(values: ReadonlyArray<A>): A {
-  const [first, ...rest] = values;
-
-  if (first === undefined || rest.length > 0) {
-    throw new Error(`expected exactly one element, got ${values.length}`);
-  }
-
-  return first;
-}
-
-/**
- * The options a run of the tool would have, pointed at this test's tree.
- *
- * @param selection - Which categories to consider.
- * @param caches - What the run does with every cache it finds.
- * @returns The survey options.
- */
-function surveying(
-  selection: Reclaim.Selection,
-  caches: Plan.CacheDisposition,
-): Reclaim.SurveyOptions {
-  return {
-    sourceRoot: tree.sourceRoot,
-    worktreeRoot: tree.worktreeRoot,
-    selection,
-    caches,
-  };
-}
-
-/**
- * What a run with `--age` does, with the cutoff resolved as the command line resolves it.
- *
- * @param days - The age in days the flag carried.
- * @returns The disposition carrying the resolved cutoff.
- */
-function pruneOlderThan(days: number): Plan.CacheDisposition {
-  return {
-    _tag: "PruneOlderThan",
-    cutoff: Cutoff.before(new Date(), Option.getOrThrow(Cutoff.parseAgeInDays(days))),
-  };
-}
-
-/**
- * Run an effect that may only look at the machine.
- *
- * @template A - What the effect produces.
- * @template E - How it can fail.
- * @param effect - The effect to run.
- * @returns Its result.
- */
-function looking<A, E>(effect: Effect.Effect<A, E, DiskInventory>): Promise<A> {
-  return Effect.runPromise(effect.pipe(Effect.provide(Inventory)));
-}
-
-/**
- * Run an effect over the whole machine, mutations included.
- *
- * Archives land inside the tree rather than in the user's home, and the clock
- * is stopped, so the file an archive will occupy is known before it is written.
- *
- * @template A - What the effect produces.
- * @template E - How it can fail.
- * @param effect - The effect to run.
- * @returns Its result.
- */
-function acting<A, E>(effect: Effect.Effect<A, E, DiskInventory | DiskMutator>): Promise<A> {
-  return Effect.runPromise(
-    effect.pipe(
-      Effect.provide(Layer.mergeAll(Inventory, makeDiskMutator(tree.archiveRoot))),
-      Effect.provideService(Clock.Clock, frozenClockAt(RUN_AT)),
-    ),
-  );
-}
-
-/** Survey the tree, with only the read-only capability in scope. */
-function survey(options: Reclaim.SurveyOptions): Promise<Plan.Plan> {
-  return looking(Reclaim.survey(options));
-}
-
-/** Carry out a plan for real. */
-function apply(plan: Plan.Plan): Promise<Reclaim.Outcome> {
-  return acting(Reclaim.apply(plan));
-}
-
-/**
- * The single refusal a run reported, failing the test when there is not exactly one.
- *
- * A refusal is an ordinary outcome rather than a failed effect: the entries
- * behind it were confirmed too, and the archives already written are the only
- * pointer to files whose worktrees are gone.
- *
- * @param outcome - What the run reported.
- * @returns The one refusal it carried.
- */
-function refusal(outcome: Reclaim.Outcome): Reclaim.Refusal {
-  return only(outcome.refused);
-}
+const { surveying, acting, apply } = bindToTree(() => tree);
 
 /**
  * Archive an entry's untracked files through the real mutator, deleting nothing.
@@ -670,6 +556,91 @@ describe("apply", () => {
     expect(await exists(cache)).toBe(false);
     expect(await listFiles(tree.worktreeRoot)).toEqual(worktreesBefore);
     expect(await worktreeRegistrations(repository)).toHaveLength(2);
+  });
+
+  test("a cache reached from two nested source roots is planned once", async () => {
+    const repository = await createRepository(tree, "app");
+    const cache = await createTurboCache(repository, [{ name: "old", ageInDays: 90 }]);
+
+    // `~/.t3` and `~/.t3/worktrees` both reach the same caches.
+    const plan = await survey({
+      ...surveying("turbo-only", deleteCaches),
+      sourceRoots: [tree.root, tree.sourceRoot],
+    });
+
+    expect(only(plan.reclaiming).target.path).toBe(cache);
+
+    const outcome = await apply(plan);
+
+    expect(await exists(cache)).toBe(false);
+    expect(outcome.refused).toEqual([]);
+  });
+
+  test("a cache reached from two spellings of one source root is planned and counted once", async () => {
+    const repository = await createRepository(tree, "app");
+    const cache = await createTurboCache(repository, [{ name: "old", ageInDays: 90 }]);
+    const link = join(tree.root, "src-link");
+    await symlink(tree.sourceRoot, link);
+
+    const { plan, walked } = await surveyRecording({
+      ...surveying("turbo-only", deleteCaches),
+      sourceRoots: [link, tree.sourceRoot],
+    });
+
+    expect(walked).toEqual([[tree.sourceRoot]]);
+
+    // Named by its physical path, so the alias cannot make a second entry and
+    // double what the report says it will free.
+    const entry = only(plan.reclaiming);
+
+    expect(entry.target.path).toBe(cache);
+    expect(plan.reclaimable).toBe(entry.target.size);
+  });
+
+  test("a cache inside a worktree is left to its removal when the source root reaches it through a link", async () => {
+    const repository = await createRepository(tree, "app");
+    await ignorePaths(repository, [".turbo/"]);
+    const worktree = await addWorktree(tree, repository, "app", "agent-1");
+    await createTurboCache(worktree, [{ name: "old", ageInDays: 90 }]);
+    const link = join(tree.root, "worktrees-link");
+    await symlink(tree.worktreeRoot, link);
+
+    // The cache spelled through the link would not sit under the worktree's
+    // path, so it would be planned beside it - and pruned after the worktree
+    // that held it was already gone.
+    const plan = await survey({
+      ...surveying("all", pruneOlderThan(30)),
+      sourceRoots: [link],
+    });
+
+    expect(only(plan.reclaiming).target.path).toBe(worktree);
+
+    const outcome = await apply(plan);
+
+    expect(await exists(worktree)).toBe(false);
+    expect(outcome.refused).toEqual([]);
+  });
+
+  test("a cache inside a worktree being removed is left to the worktree's removal", async () => {
+    const repository = await createRepository(tree, "app");
+    await ignorePaths(repository, [".turbo/"]);
+    const worktree = await addWorktree(tree, repository, "app", "agent-1");
+    await createTurboCache(worktree, [{ name: "old", ageInDays: 90 }]);
+
+    // A source root that holds the worktree root, as `~/.t3` holds `~/.t3/worktrees`.
+    const plan = await survey({
+      ...surveying("all", deleteCaches),
+      sourceRoots: [tree.worktreeRoot],
+    });
+
+    // One target, not two: planning the cache as well would count it twice,
+    // and whichever deletion ran second would fail on a path already gone.
+    expect(only(plan.reclaiming).target.path).toBe(worktree);
+
+    const outcome = await apply(plan);
+
+    expect(await exists(worktree)).toBe(false);
+    expect(outcome.refused).toEqual([]);
   });
 
   test("a pruned cache loses exactly the entries the survey measured", async () => {
