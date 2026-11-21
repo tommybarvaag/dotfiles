@@ -36,8 +36,11 @@ through a symlink.
 Vitest temp directories are looked for in every place `os.tmpdir()` can have
 pointed for the runs that leaked them: `$TMPDIR`, the per-user `/var/folders/…/T`
 that `getconf DARWIN_USER_TEMP_DIR` names whatever `$TMPDIR` says, and
-`/private/tmp`, which agent harnesses often hand their children. Each is resolved
-to its physical path, so `/tmp` and `/private/tmp` are searched once.
+`/private/tmp`, which agent harnesses often hand their children. They are handed
+to the same walk as any `--temp-root`, which resolves each to its physical path,
+so `/tmp` and `/private/tmp` are searched once; a default that does not exist is
+skipped, and one that exists and cannot be read fails the scan like any other
+root.
 `--temp-root` is repeatable and replaces the defaults when given. The report
 folds them into one row per root, because a busy machine leaks thousands a day.
 
@@ -72,6 +75,9 @@ Vitest put it there, and the directory is not even reported — it was never a
 candidate. A file directly inside it settles that before any of its
 subdirectories is read, so a 21-character checkout holding an unreadable
 directory beside its `package.json` is dropped, not reported as unreadable.
+The subdirectories are then read one at a time, and the first that rules the
+directory out settles it the same way: one that cannot be read is reported only
+when nothing else it holds disqualified it.
 
 A recognised directory is deleted only when nothing has been written into it
 for `--temp-age` hours (default 1). A run that is still going keeps writing
@@ -240,7 +246,8 @@ and well before that it reaches past 1970, which `find -newermt` cannot parse.
 
 The layout follows the repo coding standards: a pure functional core, an
 application service that sequences effects through narrow ports, and a single
-adapter holding every subprocess call.
+adapter holding every subprocess call, beside the two filesystem readers it
+drives.
 
 ```
 src/
@@ -253,7 +260,9 @@ src/
   ports.ts              DiskInventory (read), DiskMutator (write), ScanProgress (report)
   reclaim.ts            the application service: survey / apply
   adapters/
-    bun-disk.ts         the tree walk, du, df, git, tar
+    bun-disk.ts         the live inventory and mutator: du, df, git, tar, and the finders
+    tree-walk.ts        the bounded in-process directory walk every finder runs
+    vitest-temp-reader.ts  the lstat-first read of a Vitest temp candidate
     terminal-progress.ts  the status line, and the silent implementations
   cli.ts                flags, confirmation, report rendering
   main.ts               composition root
@@ -425,8 +434,10 @@ as zero, and that stale entries are selected on the cutoff _instant_ rather
 than the calendar day it falls on.
 
 The destructive half — `survey` and `apply` over the live inventory and the
-live mutator — is covered in `test/reclaim.test.ts`, which asserts what survived
-rather than what was called:
+live mutator — is covered in `test/reclaim.test.ts`, with the Vitest temp
+directory cases in `test/reclaim-vitest.test.ts` over the same harness
+(`test/reclaim-harness.ts`). Both assert what survived rather than what was
+called:
 
 - a survey that plans two deletions leaves every file on disk untouched;
 - an untracked-only worktree is removed only after an archive that really holds
@@ -471,7 +482,9 @@ rather than what was called:
   refused and is still there afterwards — the first two used to read as gone
   and be removed;
 - a 21-character checkout holding a `package.json` beside an unreadable
-  directory produces no row at all;
+  directory produces no row at all, and neither does one holding only
+  directories, where a README in one disqualifies it and another cannot be read;
+- a temp root that exists and cannot be read fails the scan, naming it;
 - a temp root reached by two spellings, as `/tmp` and `/private/tmp` are, is
   walked once;
 - a source root reached by two spellings plans its cache once, and one that

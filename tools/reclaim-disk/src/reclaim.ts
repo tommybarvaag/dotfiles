@@ -36,25 +36,10 @@ import {
   TempDirWrittenSinceSurvey,
   WorktreeChangedSinceSurvey,
 } from "./errors.ts";
-import { DiskInventory, DiskMutator, type SearchResult } from "./ports.ts";
+import { DiskInventory, DiskMutator, type SearchResult, type TempRoots } from "./ports.ts";
 
 /** Which categories of target to consider. */
 export type Selection = "all" | "turbo-only" | "worktrees-only" | "vitest-only";
-
-/**
- * Where Vitest temp directories are looked for.
- *
- * The defaults are a fact about the machine - where `os.tmpdir()` can have
- * pointed for the runs that leaked them - so the inventory is asked for them
- * rather than the command line guessing. Given roots replace them.
- */
-export type TempRoots =
-  | { readonly _tag: "MachineDefaults" }
-  | {
-      readonly _tag: "Given";
-      /** The roots to search instead. */
-      readonly roots: Worktree.NonEmptyArray<string>;
-    };
 
 /** Where to look and what to consider. */
 export type SurveyOptions = {
@@ -444,9 +429,7 @@ const surveyVitestTempDirs = Effect.fn("Reclaim.surveyVitestTempDirs")(function*
   options: SurveyOptions,
 ) {
   const inventory = yield* DiskInventory;
-  const roots = options.tempRoots;
-  const searched = roots._tag === "Given" ? roots.roots : yield* inventory.vitestTempRoots;
-  const found = yield* inventory.findVitestTempCandidates(searched);
+  const found = yield* inventory.findVitestTempCandidates(options.tempRoots);
 
   const examined = yield* Effect.forEach(found.matches, examineVitestTempDir, {
     concurrency: SCAN_CONCURRENCY,

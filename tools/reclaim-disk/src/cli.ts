@@ -7,7 +7,7 @@
  * What it does own is resolving `--age` into the one cutoff instant the rest
  * of the run uses.
  */
-import { Clock, Console, Effect, Option, Stdio } from "effect";
+import { type Array, Clock, Console, Effect, Option, Stdio } from "effect";
 import { Command, Flag, Prompt } from "effect/unstable/cli";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,9 +16,8 @@ import * as Cutoff from "./domain/cutoff.ts";
 import * as Kilobytes from "./domain/kilobytes.ts";
 import { CommandFailed } from "./errors.ts";
 import type * as Plan from "./domain/plan.ts";
-import type * as Worktree from "./domain/worktree.ts";
 import { describe } from "./domain/worktree.ts";
-import { ScanProgress } from "./ports.ts";
+import { ScanProgress, type TempRoots } from "./ports.ts";
 import * as Reclaim from "./reclaim.ts";
 
 /** Whether this run only reports, or acts on what it reports. */
@@ -136,10 +135,10 @@ function renderRow(entry: Plan.PlanEntry): string {
  */
 function lines(
   entries: ReadonlyArray<Plan.PlanEntry>,
-): ReadonlyArray<Worktree.NonEmptyArray<Plan.PlanEntry>> {
+): ReadonlyArray<Array.NonEmptyReadonlyArray<Plan.PlanEntry>> {
   // An entry that does not fold is keyed by itself, so it is a line of its
   // own; a Map keeps its keys in insertion order, which is the report's.
-  const groups = new Map<Plan.PlanEntry | string, [Plan.PlanEntry, ...Array<Plan.PlanEntry>]>();
+  const groups = new Map<Plan.PlanEntry | string, Array.NonEmptyArray<Plan.PlanEntry>>();
 
   for (const entry of entries) {
     const key =
@@ -164,7 +163,7 @@ function lines(
  * @param line - The entries the line stands for: one, or a fold of several.
  * @returns The formatted row.
  */
-function renderLine(line: Worktree.NonEmptyArray<Plan.PlanEntry>): string {
+function renderLine(line: Array.NonEmptyReadonlyArray<Plan.PlanEntry>): string {
   const [first, ...rest] = line;
 
   if (rest.length === 0) {
@@ -483,7 +482,7 @@ const worktreeRootFlag = Flag.String("worktree-root").pipe(
 // for the runs that leaked these is a fact about the machine.
 const tempRootFlag = Flag.String("temp-root").pipe(
   Flag.atLeast(0),
-  Flag.map((given): Reclaim.TempRoots => {
+  Flag.map((given): TempRoots => {
     const [first, ...rest] = given;
 
     return first === undefined

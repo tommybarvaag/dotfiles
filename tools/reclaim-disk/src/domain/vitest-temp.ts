@@ -20,9 +20,6 @@
  * `environment.name`, which is `ssr` for the default pool but whatever a
  * project's environment is called otherwise.
  */
-import { Option } from "effect";
-import { shouldNeverHappen } from "../defect.ts";
-
 /** Length of the nanoid Vitest names a project's temp directory with. */
 const PROJECT_NAME_LENGTH = 21;
 
@@ -40,8 +37,8 @@ const MODULE_FILE_NAME = /^[0-9a-f]{40}$/u;
  */
 export type EntryKind = "Directory" | "File" | "Other";
 
-/** One entry inside an environment directory. */
-export type ModuleEntry = {
+/** One entry a directory listing found, at any level of a candidate. */
+export type DirectoryEntry = {
   /** The entry's name. */
   readonly name: string;
   /** What it is. */
@@ -62,7 +59,7 @@ export type ProjectEntry =
       /** When the directory last gained or lost an entry, which is when Vitest last wrote a module. */
       readonly modified: Date;
       /** What it holds. */
-      readonly entries: ReadonlyArray<ModuleEntry>;
+      readonly entries: ReadonlyArray<DirectoryEntry>;
     }
   | {
       readonly kind: "File" | "Other";
@@ -132,6 +129,35 @@ export function isCandidateName(name: string): boolean {
 export type Unrecognised = Extract<Recognition, { readonly _tag: "Unrecognised" }>;
 
 /**
+ * A candidate whose own name and listing are what Vitest writes, so its
+ * environment directories are worth reading.
+ */
+export type Candidate = {
+  readonly _tag: "Candidate";
+  /** The names of its environment directories: every entry it holds. */
+  readonly environments: ReadonlyArray<string>;
+};
+
+/** What one readable environment directory adds to the evidence about its candidate. */
+export type EnvironmentEvidence = {
+  readonly _tag: "Modules";
+  /** How many transformed modules it holds. */
+  readonly modules: number;
+  /** When it last gained or lost a module. */
+  readonly lastWritten: Date;
+};
+
+/**
+ * Why an entry directly inside a candidate disqualifies it.
+ *
+ * @param name - The entry's name.
+ * @returns The candidate's verdict.
+ */
+function notADirectory(name: string): Unrecognised {
+  return { _tag: "Unrecognised", reason: `holds ${name}, which is not a directory` };
+}
+
+/**
  * Rule a candidate out from its own name and listing, before any of its
  * subdirectories is read.
  *
@@ -143,27 +169,49 @@ export type Unrecognised = Extract<Recognition, { readonly _tag: "Unrecognised" 
  *
  * @param name - The candidate's own name.
  * @param entries - What it holds directly, symlinks not followed.
- * @returns Why it is not Vitest's, or `None` when its subdirectories still have to be read to tell.
+ * @returns Why it is not Vitest's, or the environment directories still to be read to tell.
  */
 export function screen(
   name: string,
-  entries: ReadonlyArray<ModuleEntry>,
-): Option.Option<Unrecognised> {
+  entries: ReadonlyArray<DirectoryEntry>,
+): Candidate | Unrecognised {
   if (!isCandidateName(name)) {
-    return Option.some({
-      _tag: "Unrecognised",
-      reason: "not named like a Vitest project directory",
-    });
+    return { _tag: "Unrecognised", reason: "not named like a Vitest project directory" };
   }
 
   const stray = entries.find((entry) => entry.kind !== "Directory");
 
   return stray === undefined
-    ? Option.none()
-    : Option.some({
+    ? { _tag: "Candidate", environments: entries.map((entry) => entry.name) }
+    : notADirectory(stray.name);
+}
+
+/**
+ * Decide what one entry of a candidate says about it, on its own.
+ *
+ * The rule for an environment directory: it holds only regular files named by
+ * a SHA-1. One environment breaking it disqualifies the whole candidate, so a
+ * reader may stop at the first that does - whatever it could or could not
+ * read of the rest.
+ *
+ * @param entry - One entry directly inside the candidate, listed if it is a directory.
+ * @returns How many modules it holds and when it was last written to, or why the candidate is not Vitest's.
+ */
+export function screenEnvironment(entry: ProjectEntry): EnvironmentEvidence | Unrecognised {
+  if (entry.kind !== "Directory") {
+    return notADirectory(entry.name);
+  }
+
+  const stray = entry.entries.find(
+    (module) => module.kind !== "File" || !MODULE_FILE_NAME.test(module.name),
+  );
+
+  return stray === undefined
+    ? { _tag: "Modules", modules: entry.entries.length, lastWritten: entry.modified }
+    : {
         _tag: "Unrecognised",
-        reason: `holds ${stray.name}, which is not a directory`,
-      });
+        reason: `${entry.name}/${stray.name} is not a transformed module`,
+      };
 }
 
 /**
@@ -180,31 +228,24 @@ export function screen(
 export function recognise(listing: ProjectListing): Recognition {
   const screened = screen(listing.name, listing.entries);
 
-  if (Option.isSome(screened)) {
-    return screened.value;
+  if (screened._tag === "Unrecognised") {
+    return screened;
   }
 
   let modules = 0;
   let lastWritten = listing.modified;
 
   for (const entry of listing.entries) {
-    if (entry.kind !== "Directory") {
-      return shouldNeverHappen("screen rules out every entry that is not a directory");
+    const evidence = screenEnvironment(entry);
+
+    if (evidence._tag === "Unrecognised") {
+      return evidence;
     }
 
-    for (const module of entry.entries) {
-      if (module.kind !== "File" || !MODULE_FILE_NAME.test(module.name)) {
-        return {
-          _tag: "Unrecognised",
-          reason: `${entry.name}/${module.name} is not a transformed module`,
-        };
-      }
-    }
+    modules += evidence.modules;
 
-    modules += entry.entries.length;
-
-    if (entry.modified.getTime() > lastWritten.getTime()) {
-      lastWritten = entry.modified;
+    if (evidence.lastWritten.getTime() > lastWritten.getTime()) {
+      lastWritten = evidence.lastWritten;
     }
   }
 

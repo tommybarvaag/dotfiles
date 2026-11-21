@@ -8,18 +8,24 @@
  * substitute cannot prove the thing worth proving - that when archiving fails
  * for a reason the filesystem produced, the worktree is still there afterwards.
  *
- * Each test asserts what survived, not that a function was called.
+ * Each test asserts what survived, not that a function was called. The Vitest
+ * temp directory suite is `reclaim-vitest.test.ts`, over the same harness.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { Clock, Effect, Layer, Option } from "effect";
+import { Effect, Option } from "effect";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { DiskInventoryLive, makeDiskMutator } from "../src/adapters/bun-disk.ts";
-import { ScanProgressSilent } from "../src/adapters/terminal-progress.ts";
-import * as Cutoff from "../src/domain/cutoff.ts";
 import type * as Plan from "../src/domain/plan.ts";
-import { type DiskInventory, DiskMutator, ScanProgress } from "../src/ports.ts";
-import * as Reclaim from "../src/reclaim.ts";
+import { DiskMutator } from "../src/ports.ts";
+import {
+  bindToTree,
+  deleteCaches,
+  only,
+  pruneOlderThan,
+  refusal,
+  survey,
+  surveyRecording,
+} from "./reclaim-harness.ts";
 import {
   addStaleRegistration,
   addWorktree,
@@ -29,50 +35,19 @@ import {
   createRepository,
   createTempTree,
   createTurboCache,
-  createVitestTempDir,
   encloseInRepository,
-  entryExists,
   exists,
-  frozenClockAt,
   ignorePaths,
   listFiles,
   removeTempTree,
   runOrThrow,
-  sha1,
   type TempTree,
   worktreeRegistrations,
   writeBlob,
 } from "./temp-tree.ts";
 
-/**
- * The read-only half of the machine, with progress suppressed.
- *
- * `survey` is run with nothing else in scope: no mutating capability exists in
- * its context, so "the survey deleted something" is not a failure this suite
- * has to catch - it is a program that would not compile.
- */
-const Inventory = Layer.provide(DiskInventoryLive, ScanProgressSilent);
-
 /** Text written into a worktree and never committed, standing in for the only copy of something. */
 const ONLY_COPY = "the only copy of this\n";
-
-/** What a run with no `--age` does with every cache it finds. */
-const deleteCaches: Plan.CacheDisposition = { _tag: "Delete" };
-
-/**
- * Resolve the default Vitest grace the way the command line does.
- *
- * Against the real clock rather than `RUN_AT`, because the fixtures are
- * backdated from the real clock too.
- *
- * @returns The instant one hour ago.
- */
-function vitestStaleBefore(): Cutoff.Cutoff {
-  return Cutoff.hoursBefore(new Date(), Option.getOrThrow(Cutoff.parseAgeInHours(1)));
-}
-
-/** The instant every applying run's clock is stopped at. */
-const RUN_AT = new Date("2026-03-01T12:00:00Z");
 
 let tree: TempTree;
 
@@ -84,153 +59,7 @@ afterEach(async () => {
   await removeTempTree(tree);
 });
 
-/**
- * The single element of a collection, failing the test when there is not exactly one.
- *
- * @template A - The element type.
- * @param values - The collection to unwrap.
- * @returns Its only element.
- * @throws When the collection does not hold exactly one element.
- */
-function only<A>(values: ReadonlyArray<A>): A {
-  const [first, ...rest] = values;
-
-  if (first === undefined || rest.length > 0) {
-    throw new Error(`expected exactly one element, got ${values.length}`);
-  }
-
-  return first;
-}
-
-/**
- * The options a run of the tool would have, pointed at this test's tree.
- *
- * @param selection - Which categories to consider.
- * @param caches - What the run does with every cache it finds.
- * @returns The survey options.
- */
-function surveying(
-  selection: Reclaim.Selection,
-  caches: Plan.CacheDisposition,
-): Reclaim.SurveyOptions {
-  return {
-    sourceRoots: [tree.sourceRoot],
-    worktreeRoot: tree.worktreeRoot,
-    tempRoots: { _tag: "Given", roots: [tree.tempRoot] },
-    selection,
-    policy: { caches, vitestTempStaleBefore: vitestStaleBefore() },
-  };
-}
-
-/**
- * What a run with `--age` does, with the cutoff resolved as the command line resolves it.
- *
- * @param days - The age in days the flag carried.
- * @returns The disposition carrying the resolved cutoff.
- */
-function pruneOlderThan(days: number): Plan.CacheDisposition {
-  return {
-    _tag: "PruneOlderThan",
-    cutoff: Cutoff.before(new Date(), Option.getOrThrow(Cutoff.parseAgeInDays(days))),
-  };
-}
-
-/**
- * Run an effect that may only look at the machine.
- *
- * @template A - What the effect produces.
- * @template E - How it can fail.
- * @param effect - The effect to run.
- * @returns Its result.
- */
-function looking<A, E>(effect: Effect.Effect<A, E, DiskInventory>): Promise<A> {
-  return Effect.runPromise(effect.pipe(Effect.provide(Inventory)));
-}
-
-/**
- * Run an effect over the whole machine, mutations included.
- *
- * Archives land inside the tree rather than in the user's home, and the clock
- * is stopped, so the file an archive will occupy is known before it is written.
- *
- * @template A - What the effect produces.
- * @template E - How it can fail.
- * @param effect - The effect to run.
- * @returns Its result.
- */
-function acting<A, E>(effect: Effect.Effect<A, E, DiskInventory | DiskMutator>): Promise<A> {
-  return Effect.runPromise(
-    effect.pipe(
-      Effect.provide(Layer.mergeAll(Inventory, makeDiskMutator(tree.archiveRoot))),
-      Effect.provideService(Clock.Clock, frozenClockAt(RUN_AT)),
-    ),
-  );
-}
-
-/** Survey the tree, with only the read-only capability in scope. */
-function survey(options: Reclaim.SurveyOptions): Promise<Plan.Plan> {
-  return looking(Reclaim.survey(options));
-}
-
-/**
- * Survey the tree, recording what the inventory told the progress port.
- *
- * A plan is deduplicated, so it cannot say how often a root was walked; the
- * progress port is told which roots each search walks and every match it
- * reaches, which is what lets a test prove a root was walked once rather than
- * walked twice and merged.
- *
- * @param options - Where to look and what to consider.
- * @returns The plan, the roots each search walked, and each path reported as found.
- */
-async function surveyRecording(options: Reclaim.SurveyOptions): Promise<{
-  readonly plan: Plan.Plan;
-  readonly walked: ReadonlyArray<ReadonlyArray<string>>;
-  readonly found: ReadonlyArray<string>;
-}> {
-  const walked: Array<ReadonlyArray<string>> = [];
-  const found: Array<string> = [];
-  const recording = Layer.succeed(
-    ScanProgress,
-    ScanProgress.of({
-      scanning: (_lookingFor, roots) =>
-        Effect.sync(() => {
-          walked.push(roots);
-        }),
-      found: (path) =>
-        Effect.sync(() => {
-          found.push(path);
-        }),
-      measured: () => Effect.void,
-      done: Effect.void,
-    }),
-  );
-
-  const plan = await Effect.runPromise(
-    Reclaim.survey(options).pipe(Effect.provide(Layer.provide(DiskInventoryLive, recording))),
-  );
-
-  return { plan, walked, found };
-}
-
-/** Carry out a plan for real. */
-function apply(plan: Plan.Plan): Promise<Reclaim.Outcome> {
-  return acting(Reclaim.apply(plan));
-}
-
-/**
- * The single refusal a run reported, failing the test when there is not exactly one.
- *
- * A refusal is an ordinary outcome rather than a failed effect: the entries
- * behind it were confirmed too, and the archives already written are the only
- * pointer to files whose worktrees are gone.
- *
- * @param outcome - What the run reported.
- * @returns The one refusal it carried.
- */
-function refusal(outcome: Reclaim.Outcome): Reclaim.Refusal {
-  return only(outcome.refused);
-}
+const { surveying, acting, apply } = bindToTree(() => tree);
 
 /**
  * Archive an entry's untracked files through the real mutator, deleting nothing.
@@ -831,219 +660,5 @@ describe("apply", () => {
     await apply(plan);
 
     expect(only(await listFiles(cache))).toContain(join("fresh", "artifact.bin"));
-  });
-});
-
-/**
- * Every path a plan names, whichever section it is in.
- *
- * @param plan - The plan to read.
- * @returns Each path the report would print.
- */
-function named(plan: Plan.Plan): ReadonlyArray<string> {
-  return [
-    ...plan.reclaiming.map((entry) => entry.target.path),
-    ...plan.keeping.map((entry) => entry.target.path),
-    ...plan.unexamined.map((entry) => entry.path),
-  ];
-}
-
-describe("Vitest temp directories", () => {
-  /** A stale project directory, as a killed run leaves one. */
-  const STALE = "Cjkj_H4LKz5PpUh7WCbX1";
-
-  /** A project directory a run wrote into minutes ago. */
-  const FRESH = "8712f0Ev63ntQifCOeFFS";
-
-  test("a stale one is removed, a fresh one is kept, and nothing that only looks like one is touched", async () => {
-    const stale = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2, client: 1 });
-    const fresh = await createVitestTempDir(tree.tempRoot, FRESH, 0, { ssr: 2 });
-
-    // Each of these sat in a real temp root beside Vitest's directories.
-    const checkout = join(tree.tempRoot, "toast-review-ha6vdvqk");
-    await mkdir(join(checkout, "packages"), { recursive: true });
-    await writeFile(join(checkout, "package.json"), "{}\n");
-
-    const logs = join(tree.tempRoot, "cursor-agent-logs-501");
-    await mkdir(logs);
-    await writeBlob(join(logs, "latest.log"), 1);
-
-    const lookalike = await createVitestTempDir(tree.tempRoot, "AAAAAAAAAAAAAAAAAAAAA", 3, {
-      ssr: 2,
-    });
-    await writeBlob(join(lookalike, "ssr", "notes.md"), 2);
-
-    const empty = join(tree.tempRoot, "EEEEEEEEEEEEEEEEEEEEE");
-    await mkdir(join(empty, "ssr"), { recursive: true });
-
-    const plan = await survey(surveying("vitest-only", deleteCaches));
-
-    expect(only(plan.reclaiming).target.path).toBe(stale);
-    expect(only(plan.keeping).target.path).toBe(fresh);
-    expect(plan.unexamined).toEqual([]);
-
-    for (const decoy of [checkout, logs, lookalike, empty]) {
-      expect(named(plan)).not.toContain(decoy);
-    }
-
-    const outcome = await apply(plan);
-
-    expect(outcome.refused).toEqual([]);
-    expect(outcome.removed).toBe(1);
-    expect(await exists(stale)).toBe(false);
-
-    const survivors = [fresh, checkout, logs, lookalike, empty];
-
-    expect(await Promise.all(survivors.map((survivor) => exists(survivor)))).toEqual(
-      survivors.map(() => true),
-    );
-  });
-
-  test("one written to between the survey and the deletion is refused and survives", async () => {
-    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
-
-    const plan = await survey(surveying("vitest-only", deleteCaches));
-
-    expect(only(plan.reclaiming).target.path).toBe(project);
-
-    // A run that is still going transforms another module.
-    await writeBlob(join(project, "ssr", sha1("a module transformed just now")), 3);
-
-    const outcome = await apply(plan);
-
-    expect(await exists(project)).toBe(true);
-    expect(outcome.removed).toBe(0);
-    expect(refusal(outcome).path).toBe(project);
-    expect(refusal(outcome).remains).toBe("Untouched");
-  });
-
-  test("a 21-character checkout holding a file is dropped without reading the rest of it", async () => {
-    // A file beside the directories already rules it out, so the unreadable
-    // directory beside it is never listed - and never shows up as a row about
-    // a directory this tool had no business reading.
-    const checkout = join(tree.tempRoot, "toast-review-ha6vdvqk");
-    const locked = join(checkout, "packages");
-    await mkdir(locked, { recursive: true });
-    await writeFile(join(checkout, "package.json"), "{}\n");
-    await chmod(locked, 0o000);
-
-    const plan = await survey(surveying("vitest-only", deleteCaches));
-
-    expect(plan.reclaiming).toEqual([]);
-    expect(plan.keeping).toEqual([]);
-    expect(plan.unexamined).toEqual([]);
-  });
-
-  /**
-   * Survey one stale project directory, replace it before the deletion, and apply.
-   *
-   * @param replace - What happens at the planned path between the two.
-   * @returns The planned path and what the run reported.
-   */
-  async function replacedBeforeApply(
-    replace: (project: string) => Promise<void>,
-  ): Promise<{ readonly project: string; readonly outcome: Reclaim.Outcome }> {
-    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
-    const plan = await survey(surveying("vitest-only", deleteCaches));
-
-    expect(only(plan.reclaiming).target.path).toBe(project);
-
-    await rm(project, { recursive: true });
-    await replace(project);
-
-    return { project, outcome: await apply(plan) };
-  }
-
-  test("one replaced by a regular file before the deletion is refused, and the file survives", async () => {
-    const { project, outcome } = await replacedBeforeApply((path) => writeBlob(path, 1));
-
-    expect(outcome.removed).toBe(0);
-    expect(refusal(outcome).path).toBe(project);
-    expect(refusal(outcome).remains).toBe("Untouched");
-    expect(await exists(project)).toBe(true);
-  });
-
-  test("one replaced by a dangling symlink before the deletion is refused, and the link survives", async () => {
-    const { project, outcome } = await replacedBeforeApply((path) =>
-      symlink(join(tree.root, "nowhere"), path),
-    );
-
-    expect(outcome.removed).toBe(0);
-    expect(refusal(outcome).path).toBe(project);
-    expect(refusal(outcome).remains).toBe("Untouched");
-    expect(await entryExists(project)).toBe(true);
-  });
-
-  test("one replaced by a symlink to a directory before the deletion is refused, and both survive", async () => {
-    const elsewhere = await createVitestTempDir(tree.root, FRESH, 3, { ssr: 2 });
-    const { project, outcome } = await replacedBeforeApply((path) => symlink(elsewhere, path));
-
-    expect(outcome.removed).toBe(0);
-    expect(refusal(outcome).path).toBe(project);
-    expect(refusal(outcome).remains).toBe("Untouched");
-    expect(await entryExists(project)).toBe(true);
-    expect(await listFiles(elsewhere)).toHaveLength(2);
-  });
-
-  test("one whose environment directory became a symlink before the deletion is refused", async () => {
-    const elsewhere = await createVitestTempDir(tree.root, FRESH, 3, { ssr: 2 });
-    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
-    const plan = await survey(surveying("vitest-only", deleteCaches));
-
-    await rm(join(project, "ssr"), { recursive: true });
-    await symlink(join(elsewhere, "ssr"), join(project, "ssr"));
-
-    const outcome = await apply(plan);
-
-    expect(outcome.removed).toBe(0);
-    expect(refusal(outcome).remains).toBe("Untouched");
-    expect(await entryExists(join(project, "ssr"))).toBe(true);
-    expect(await listFiles(elsewhere)).toHaveLength(2);
-  });
-
-  test("one its run removed before the deletion reached it counts as done, not refused", async () => {
-    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
-
-    const plan = await survey(surveying("vitest-only", deleteCaches));
-
-    // The run closed cleanly and cleared its own directory.
-    await rm(project, { recursive: true });
-
-    const outcome = await apply(plan);
-
-    expect(outcome.refused).toEqual([]);
-    expect(outcome.removed).toBe(1);
-  });
-
-  test("a root reached by two spellings, as /tmp and /private/tmp are, is walked once", async () => {
-    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
-    const link = join(tree.root, "tmp-link");
-    await symlink(tree.tempRoot, link);
-
-    const { plan, walked, found } = await surveyRecording({
-      ...surveying("vitest-only", deleteCaches),
-      tempRoots: { _tag: "Given", roots: [link, tree.tempRoot] },
-    });
-
-    expect(only(plan.reclaiming).target.path).toBe(project);
-    expect(walked).toEqual([[tree.tempRoot]]);
-    expect(found).toEqual([project]);
-
-    const outcome = await apply(plan);
-
-    expect(outcome.refused).toEqual([]);
-    expect(await exists(project)).toBe(false);
-  });
-
-  test("a temp root that does not exist holds nothing, and the other categories still report", async () => {
-    const repository = await createRepository(tree, "app");
-    const cache = await createTurboCache(repository, [{ name: "old", ageInDays: 90 }]);
-
-    const plan = await survey({
-      ...surveying("all", deleteCaches),
-      tempRoots: { _tag: "Given", roots: [join(tree.root, "never-created")] },
-    });
-
-    expect(only(plan.reclaiming).target.path).toBe(cache);
   });
 });

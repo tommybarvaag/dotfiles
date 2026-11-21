@@ -253,3 +253,24 @@ export class CommandFailed extends Schema.TaggedError<CommandFailed>()("CommandF
 export function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+
+/**
+ * Read the `code` a Node filesystem error carries, if it carries one.
+ *
+ * Both filesystem readers classify by it - the walk to decide whether an
+ * unlistable directory is absent, denied, or unusable, and the Vitest temp
+ * reader to tell a directory that vanished from one that was replaced - so it
+ * sits beside `messageOf` rather than in either of them.
+ *
+ * @param cause - The value a filesystem call rejected with.
+ * @returns The error code, or an empty string when there is none.
+ */
+export function errorCodeOf(cause: unknown): string {
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) {
+    return "";
+  }
+
+  const { code } = cause;
+
+  return typeof code === "string" ? code : "";
+}

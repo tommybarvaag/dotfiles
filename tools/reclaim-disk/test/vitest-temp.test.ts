@@ -16,7 +16,7 @@ const LATE = new Date("2026-11-21T10:56:00Z");
 function environment(
   name: string,
   modified: Date,
-  entries: ReadonlyArray<VitestTemp.ModuleEntry>,
+  entries: ReadonlyArray<VitestTemp.DirectoryEntry>,
 ): VitestTemp.ProjectEntry {
   return { kind: "Directory", name, modified, entries };
 }
@@ -106,5 +106,69 @@ describe("recognise", () => {
       "Unrecognised",
     );
     expect(VitestTemp.recognise(listing([]))._tag).toBe("Unrecognised");
+  });
+});
+
+describe("screen", () => {
+  test("a nanoid-named directory holding only directories is a candidate naming each of them", () => {
+    expect(
+      VitestTemp.screen(NAME, [
+        { name: "ssr", kind: "Directory" },
+        { name: "client", kind: "Directory" },
+      ]),
+    ).toEqual({ _tag: "Candidate", environments: ["ssr", "client"] });
+  });
+
+  test("a file or symlink beside the directories rules it out before any is read", () => {
+    for (const kind of ["File", "Other"] as const) {
+      expect(
+        VitestTemp.screen(NAME, [
+          { name: "packages", kind: "Directory" },
+          { name: "package.json", kind },
+        ]),
+      ).toEqual({ _tag: "Unrecognised", reason: "holds package.json, which is not a directory" });
+    }
+  });
+
+  test("a name that is not a nanoid rules it out whatever it holds", () => {
+    expect(VitestTemp.screen("not-a-nanoid", [{ name: "ssr", kind: "Directory" }])._tag).toBe(
+      "Unrecognised",
+    );
+  });
+});
+
+describe("screenEnvironment", () => {
+  test("an environment of transformed modules counts them and carries when it was written", () => {
+    expect(
+      VitestTemp.screenEnvironment(
+        environment("ssr", LATE, [
+          { name: MODULE, kind: "File" },
+          { name: "da39a3ee5e6b4b0d3255bfef95601890afd80709", kind: "File" },
+        ]),
+      ),
+    ).toEqual({ _tag: "Modules", modules: 2, lastWritten: LATE });
+  });
+
+  test("one entry that is not a transformed module disqualifies the candidate on its own", () => {
+    expect(
+      VitestTemp.screenEnvironment(
+        environment("packages", EARLY, [{ name: "README.md", kind: "File" }]),
+      ),
+    ).toEqual({ _tag: "Unrecognised", reason: "packages/README.md is not a transformed module" });
+  });
+
+  test("an entry that is not a directory disqualifies the candidate", () => {
+    expect(VitestTemp.screenEnvironment({ kind: "Other", name: "ssr" })).toEqual({
+      _tag: "Unrecognised",
+      reason: "holds ssr, which is not a directory",
+    });
+  });
+
+  test("an empty environment adds no modules without disqualifying the candidate", () => {
+    expect(VitestTemp.screenEnvironment(environment("ssr", EARLY, []))).toEqual({
+      _tag: "Modules",
+      modules: 0,
+      lastWritten: EARLY,
+    });
   });
 });

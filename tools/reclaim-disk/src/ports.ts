@@ -7,7 +7,7 @@
  * but because the mutating capability is absent from the effect's requirements
  * and the compiler enforces it.
  */
-import { Context, type Effect } from "effect";
+import { type Array, Context, type Effect } from "effect";
 import type { Cutoff } from "./domain/cutoff.ts";
 import type { Kilobytes } from "./domain/kilobytes.ts";
 import type * as VitestTemp from "./domain/vitest-temp.ts";
@@ -96,6 +96,21 @@ export type SearchResult = {
   readonly skipped: ReadonlyArray<UnreadableDirectory>;
 };
 
+/**
+ * Where Vitest temp directories are looked for.
+ *
+ * The defaults are a fact about the machine - where `os.tmpdir()` can have
+ * pointed for the runs that leaked them - so the inventory spells them out
+ * rather than the command line guessing. Given roots replace them.
+ */
+export type TempRoots =
+  | { readonly _tag: "MachineDefaults" }
+  | {
+      readonly _tag: "Given";
+      /** The roots to search instead. */
+      readonly roots: Array.NonEmptyReadonlyArray<string>;
+    };
+
 /** Read-only observation of the machine. */
 export class DiskInventory extends Context.Service<
   DiskInventory,
@@ -135,33 +150,23 @@ export class DiskInventory extends Context.Service<
     readonly findWorktrees: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
 
     /**
-     * The temp roots Vitest can have written into on this machine.
-     *
-     * Vitest writes under `os.tmpdir()`, which follows `$TMPDIR` - and that is
-     * not one directory. A shell gets the per-user `/var/folders/…/T`; an agent
-     * harness often sets `/tmp`. Each is resolved to its physical path, so
-     * `/tmp` and `/private/tmp` are one root rather than two that find the same
-     * directories. Best effort: a root that cannot be resolved is left out.
-     *
-     * @returns Each distinct root, physical paths only.
-     */
-    readonly vitestTempRoots: Effect.Effect<ReadonlyArray<string>>;
-
-    /**
      * Find every directory directly inside any of several temp roots named
      * like a Vitest project directory.
      *
      * The name is a filter, not evidence: a match is a candidate for
-     * `inspectVitestTempDir` and nothing more. The roots are resolved to their
-     * physical paths first and each is walked once, so `/tmp` and
-     * `/private/tmp` find each candidate once, named the same way. A root that
-     * does not exist holds no candidates.
+     * `inspectVitestTempDir` and nothing more. The machine's defaults are
+     * spelled out by the implementation, since where `os.tmpdir()` can have
+     * pointed is a fact about the machine. Defaulted or given, the roots are
+     * then resolved to their physical paths and each is walked once, so `/tmp`
+     * and `/private/tmp` find each candidate once, named the same way. A root
+     * that does not exist holds no candidates; one that cannot be read fails
+     * the scan.
      *
      * @param roots - The temp roots to search.
      * @returns Each candidate, and every directory the search could not read.
      */
     readonly findVitestTempCandidates: (
-      roots: ReadonlyArray<string>,
+      roots: TempRoots,
     ) => Effect.Effect<SearchResult, ScanFailed>;
 
     /**
