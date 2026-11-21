@@ -21,11 +21,37 @@ function environment(
   return { kind: "Directory", name, modified, entries };
 }
 
-function listing(
+/**
+ * Recognise a listed candidate the way the reader does: screen it, screen each
+ * of its environments in turn, and conclude from what they showed.
+ *
+ * @param entries - What the candidate holds, each environment already listed.
+ * @param name - The candidate's own name.
+ * @returns When it was last written to, or why it is not Vitest's.
+ */
+function recognise(
   entries: ReadonlyArray<VitestTemp.ProjectEntry>,
   name = NAME,
-): VitestTemp.ProjectListing {
-  return { name, modified: EARLY, entries };
+): VitestTemp.Recognition {
+  const screened = VitestTemp.screen(name, EARLY, entries);
+
+  if (screened._tag === "Unrecognised") {
+    return screened;
+  }
+
+  const evidence: Array<VitestTemp.EnvironmentEvidence> = [];
+
+  for (const entry of entries) {
+    const screenedEnvironment = VitestTemp.screenEnvironment(entry);
+
+    if (screenedEnvironment._tag === "Unrecognised") {
+      return screenedEnvironment;
+    }
+
+    evidence.push(screenedEnvironment);
+  }
+
+  return VitestTemp.conclude(screened, evidence);
 }
 
 describe("isCandidateName", () => {
@@ -41,49 +67,41 @@ describe("isCandidateName", () => {
   });
 });
 
-describe("recognise", () => {
+describe("screen, screenEnvironment, and conclude together", () => {
   test("a project holding environments of transformed modules is recognised, dated by its newest write", () => {
-    const recognition = VitestTemp.recognise(
-      listing([
-        environment("ssr", LATE, [{ name: MODULE, kind: "File" }]),
-        environment("client", EARLY, [{ name: MODULE, kind: "File" }]),
-      ]),
-    );
+    const recognition = recognise([
+      environment("ssr", LATE, [{ name: MODULE, kind: "File" }]),
+      environment("client", EARLY, [{ name: MODULE, kind: "File" }]),
+    ]);
 
     expect(recognition).toEqual({ _tag: "Recognised", lastWritten: LATE });
   });
 
   test("a repository checkout with a nanoid-shaped name is not", () => {
-    const recognition = VitestTemp.recognise(
-      listing(
-        [
-          { kind: "File", name: "package.json" },
-          environment("packages", EARLY, [{ name: "app", kind: "Directory" }]),
-        ],
-        "toast-review-ha6vdvqk",
-      ),
+    const recognition = recognise(
+      [
+        { kind: "File", name: "package.json" },
+        environment("packages", EARLY, [{ name: "app", kind: "Directory" }]),
+      ],
+      "toast-review-ha6vdvqk",
     );
 
     expect(recognition._tag).toBe("Unrecognised");
   });
 
   test("a directory of log files with a nanoid-shaped name is not", () => {
-    const recognition = VitestTemp.recognise(
-      listing([{ kind: "File", name: "latest.log" }], "cursor-agent-logs-501"),
-    );
+    const recognition = recognise([{ kind: "File", name: "latest.log" }], "cursor-agent-logs-501");
 
     expect(recognition._tag).toBe("Unrecognised");
   });
 
   test("one file not named by a SHA-1 disqualifies the whole directory", () => {
-    const recognition = VitestTemp.recognise(
-      listing([
-        environment("ssr", EARLY, [
-          { name: MODULE, kind: "File" },
-          { name: "notes.md", kind: "File" },
-        ]),
+    const recognition = recognise([
+      environment("ssr", EARLY, [
+        { name: MODULE, kind: "File" },
+        { name: "notes.md", kind: "File" },
       ]),
-    );
+    ]);
 
     expect(recognition).toEqual({
       _tag: "Unrecognised",
@@ -93,36 +111,32 @@ describe("recognise", () => {
 
   test("a symlink or a nested directory disqualifies it, whatever it is named", () => {
     for (const kind of ["Other", "Directory"] as const) {
-      const recognition = VitestTemp.recognise(
-        listing([environment("ssr", EARLY, [{ name: MODULE, kind }])]),
-      );
+      const recognition = recognise([environment("ssr", EARLY, [{ name: MODULE, kind }])]);
 
       expect(recognition._tag).toBe("Unrecognised");
     }
   });
 
   test("a project holding no modules is evidence of nothing", () => {
-    expect(VitestTemp.recognise(listing([environment("ssr", EARLY, [])]))._tag).toBe(
-      "Unrecognised",
-    );
-    expect(VitestTemp.recognise(listing([]))._tag).toBe("Unrecognised");
+    expect(recognise([environment("ssr", EARLY, [])])._tag).toBe("Unrecognised");
+    expect(recognise([])._tag).toBe("Unrecognised");
   });
 });
 
 describe("screen", () => {
   test("a nanoid-named directory holding only directories is a candidate naming each of them", () => {
     expect(
-      VitestTemp.screen(NAME, [
+      VitestTemp.screen(NAME, EARLY, [
         { name: "ssr", kind: "Directory" },
         { name: "client", kind: "Directory" },
       ]),
-    ).toEqual({ _tag: "Candidate", environments: ["ssr", "client"] });
+    ).toEqual({ _tag: "Candidate", modified: EARLY, environments: ["ssr", "client"] });
   });
 
   test("a file or symlink beside the directories rules it out before any is read", () => {
     for (const kind of ["File", "Other"] as const) {
       expect(
-        VitestTemp.screen(NAME, [
+        VitestTemp.screen(NAME, EARLY, [
           { name: "packages", kind: "Directory" },
           { name: "package.json", kind },
         ]),
@@ -131,9 +145,9 @@ describe("screen", () => {
   });
 
   test("a name that is not a nanoid rules it out whatever it holds", () => {
-    expect(VitestTemp.screen("not-a-nanoid", [{ name: "ssr", kind: "Directory" }])._tag).toBe(
-      "Unrecognised",
-    );
+    expect(
+      VitestTemp.screen("not-a-nanoid", EARLY, [{ name: "ssr", kind: "Directory" }])._tag,
+    ).toBe("Unrecognised");
   });
 });
 
@@ -170,5 +184,31 @@ describe("screenEnvironment", () => {
       modules: 0,
       lastWritten: EARLY,
     });
+  });
+});
+
+describe("conclude", () => {
+  const candidate: VitestTemp.Candidate = {
+    _tag: "Candidate",
+    modified: LATE,
+    environments: ["ssr", "client"],
+  };
+
+  test("sums the modules across environments and keeps the candidate's own write when it is the latest", () => {
+    expect(
+      VitestTemp.conclude(candidate, [
+        { _tag: "Modules", modules: 0, lastWritten: EARLY },
+        { _tag: "Modules", modules: 1, lastWritten: EARLY },
+      ]),
+    ).toEqual({ _tag: "Recognised", lastWritten: LATE });
+  });
+
+  test("environments holding no modules between them are evidence of nothing", () => {
+    expect(
+      VitestTemp.conclude(candidate, [
+        { _tag: "Modules", modules: 0, lastWritten: EARLY },
+        { _tag: "Modules", modules: 0, lastWritten: LATE },
+      ]),
+    ).toEqual({ _tag: "Unrecognised", reason: "holds no transformed modules" });
   });
 });

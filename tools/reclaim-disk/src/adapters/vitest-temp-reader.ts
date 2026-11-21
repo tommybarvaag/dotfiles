@@ -94,18 +94,26 @@ async function lstatIfPresent(path: string): Promise<Option.Option<Stats>> {
 }
 
 /**
- * Decide what a read that found nothing at a path means, by looking again.
+ * Decide what a failed read of a candidate means, by looking at it again.
  *
- * `ENOENT` from a listing is not proof the candidate is gone: a dangling
- * symlink swapped in after the `lstat` fails the same way. Only `lstat` finding
- * nothing means absent; a non-directory there now is something else; and a
- * directory there now means the failure was about something beneath it.
+ * `ENOENT` or `ENOTDIR` from a listing is not proof of anything about the
+ * candidate itself: it may be gone, a file or dangling symlink may have been
+ * swapped in after the `lstat`, or the failure may be about something beneath
+ * it. So only `lstat` finding nothing means absent; a non-directory there now
+ * is something else; and a directory there now means the failure stands. Any
+ * other failure - a denied listing, an I/O error - stands without looking.
  *
  * @param path - The candidate.
- * @param cause - The `ENOENT` the read rejected with.
+ * @param cause - What the read rejected with.
  * @returns That it is gone, or that what replaced it is not Vitest's.
  */
 async function lookAgain(path: string, cause: unknown): Promise<VitestTemp.Inspection> {
+  const code = errorCodeOf(cause);
+
+  if (code !== "ENOENT" && code !== "ENOTDIR") {
+    throw cause;
+  }
+
   const now = await lstatIfPresent(path);
 
   if (Option.isNone(now)) {
@@ -133,15 +141,14 @@ async function lookAgain(path: string, cause: unknown): Promise<VitestTemp.Inspe
  * Environments are read one at a time, and the first readable one the domain
  * rules out ends the read: evidence that it is not Vitest's is an answer, so an
  * unreadable sibling - read before or after - does not turn it into a failure.
- * A read failure rejects only when no environment disqualified the candidate,
- * and a subdirectory vanishing partway through counts as absent only if the
- * candidate itself is gone too.
+ * A read failure rejects only when no environment disqualified the candidate
+ * and the candidate is still a directory: one that vanished or was replaced
+ * partway through is judged by `lookAgain`, as its own listing failing is.
  *
  * @param path - The candidate.
  * @returns When it was last written to, why it is not Vitest's, or that it is gone.
  */
 export async function readCandidate(path: string): Promise<VitestTemp.Inspection> {
-  const name = basename(path);
   const present = await lstatIfPresent(path);
 
   if (Option.isNone(present)) {
@@ -161,25 +168,16 @@ export async function readCandidate(path: string): Promise<VitestTemp.Inspection
   try {
     children = await listKinds(path);
   } catch (cause) {
-    switch (errorCodeOf(cause)) {
-      case "ENOENT":
-        return lookAgain(path, cause);
-
-      case "ENOTDIR":
-        return { _tag: "Unrecognised", reason: "not a directory" };
-
-      default:
-        throw cause;
-    }
+    return lookAgain(path, cause);
   }
 
-  const screened = VitestTemp.screen(name, children);
+  const screened = VitestTemp.screen(basename(path), info.mtime, children);
 
   if (screened._tag === "Unrecognised") {
     return screened;
   }
 
-  const environments: Array<VitestTemp.ProjectEntry> = [];
+  const evidence: Array<VitestTemp.EnvironmentEvidence> = [];
   let failure: Option.Option<unknown> = Option.none();
 
   for (const environment of screened.environments) {
@@ -193,24 +191,18 @@ export async function readCandidate(path: string): Promise<VitestTemp.Inspection
       continue;
     }
 
-    const evidence = VitestTemp.screenEnvironment(entry);
+    const screenedEnvironment = VitestTemp.screenEnvironment(entry);
 
-    if (evidence._tag === "Unrecognised") {
-      return evidence;
+    if (screenedEnvironment._tag === "Unrecognised") {
+      return screenedEnvironment;
     }
 
-    environments.push(entry);
+    evidence.push(screenedEnvironment);
   }
 
   if (Option.isSome(failure)) {
-    const cause = failure.value;
-
-    if (errorCodeOf(cause) === "ENOENT" && Option.isNone(await lstatIfPresent(path))) {
-      return { _tag: "Absent" };
-    }
-
-    throw cause;
+    return lookAgain(path, failure.value);
   }
 
-  return VitestTemp.recognise({ name, modified: info.mtime, entries: environments });
+  return VitestTemp.conclude(screened, evidence);
 }

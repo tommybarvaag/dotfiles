@@ -67,16 +67,6 @@ export type ProjectEntry =
       readonly name: string;
     };
 
-/** Everything recognising a candidate needs to know about it, read in one pass. */
-export type ProjectListing = {
-  /** The candidate's own name. */
-  readonly name: string;
-  /** When the candidate itself last gained or lost an entry. */
-  readonly modified: Date;
-  /** What it holds. */
-  readonly entries: ReadonlyArray<ProjectEntry>;
-};
-
 /** What recognising a candidate established. */
 export type Recognition =
   | {
@@ -116,7 +106,8 @@ export type Inspection =
 /**
  * Whether a name is worth reading the directory for.
  *
- * A cheap filter on the walk, never evidence: `recognise` decides.
+ * A cheap filter on the walk, never evidence: `screen`, `screenEnvironment`,
+ * and `conclude` decide.
  *
  * @param name - A directory name directly inside a temp root.
  * @returns `true` when the name is shaped like the nanoid Vitest uses.
@@ -134,6 +125,8 @@ export type Unrecognised = Extract<Recognition, { readonly _tag: "Unrecognised" 
  */
 export type Candidate = {
   readonly _tag: "Candidate";
+  /** When the candidate itself last gained or lost an entry. */
+  readonly modified: Date;
   /** The names of its environment directories: every entry it holds. */
   readonly environments: ReadonlyArray<string>;
 };
@@ -168,11 +161,13 @@ function notADirectory(name: string): Unrecognised {
  * to be dropped afterwards.
  *
  * @param name - The candidate's own name.
+ * @param modified - When the candidate itself last gained or lost an entry.
  * @param entries - What it holds directly, symlinks not followed.
  * @returns Why it is not Vitest's, or the environment directories still to be read to tell.
  */
 export function screen(
   name: string,
+  modified: Date,
   entries: ReadonlyArray<DirectoryEntry>,
 ): Candidate | Unrecognised {
   if (!isCandidateName(name)) {
@@ -182,7 +177,7 @@ export function screen(
   const stray = entries.find((entry) => entry.kind !== "Directory");
 
   return stray === undefined
-    ? { _tag: "Candidate", environments: entries.map((entry) => entry.name) }
+    ? { _tag: "Candidate", modified, environments: entries.map((entry) => entry.name) }
     : notADirectory(stray.name);
 }
 
@@ -215,33 +210,25 @@ export function screenEnvironment(entry: ProjectEntry): EnvironmentEvidence | Un
 }
 
 /**
- * Decide whether a listed directory is a Vitest project temp directory.
+ * Decide whether a screened candidate is a Vitest project temp directory, from
+ * the evidence of every one of its environments.
  *
- * Every entry has to be accounted for: the candidate holds only directories,
- * each of those holds only regular files named by a SHA-1, and there is at
- * least one such file. A single README, symlink, nested directory, or file with
- * any other name means something other than Vitest put it there.
+ * Each environment has already passed `screenEnvironment`, so what remains is
+ * the one rule no single environment can settle: there is at least one
+ * transformed module across them all.
  *
- * @param listing - What the candidate holds, symlinks not followed.
+ * @param candidate - A candidate `screen` let through.
+ * @param environments - What each of its environment directories showed, one per environment.
  * @returns When it was last written to, or why it is not one.
  */
-export function recognise(listing: ProjectListing): Recognition {
-  const screened = screen(listing.name, listing.entries);
-
-  if (screened._tag === "Unrecognised") {
-    return screened;
-  }
-
+export function conclude(
+  candidate: Candidate,
+  environments: ReadonlyArray<EnvironmentEvidence>,
+): Recognition {
   let modules = 0;
-  let lastWritten = listing.modified;
+  let lastWritten = candidate.modified;
 
-  for (const entry of listing.entries) {
-    const evidence = screenEnvironment(entry);
-
-    if (evidence._tag === "Unrecognised") {
-      return evidence;
-    }
-
+  for (const evidence of environments) {
     modules += evidence.modules;
 
     if (evidence.lastWritten.getTime() > lastWritten.getTime()) {

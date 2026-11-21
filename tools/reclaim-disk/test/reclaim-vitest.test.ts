@@ -149,12 +149,31 @@ describe("Vitest temp directories", () => {
 
   test("a 21-character directory whose readable subdirectory disqualifies it is dropped, however its unreadable sibling fails", async () => {
     // Every entry is a directory, so nothing rules it out before descending.
-    // The README in `packages` does, and it has to win over `secret` failing
-    // to list, whichever of the two is read first.
+    // The README in `packages` does, and it has to win over a locked sibling
+    // failing to list, whichever is read first: the listing comes back sorted,
+    // so `a-secret` fails before `packages` is read and `z-secret` after.
     const decoy = join(tree.tempRoot, "subdir-only-decoy-123");
     await mkdir(join(decoy, "packages"), { recursive: true });
     await writeFile(join(decoy, "packages", "README.md"), "# not a module\n");
-    const locked = join(decoy, "secret");
+
+    await Promise.all(
+      ["a-secret", "z-secret"].map(async (name) => {
+        const locked = join(decoy, name);
+        await mkdir(locked);
+        await chmod(locked, 0o000);
+      }),
+    );
+
+    const plan = await survey(surveying("vitest-only", deleteCaches));
+
+    expect(plan.reclaiming).toEqual([]);
+    expect(plan.keeping).toEqual([]);
+    expect(plan.unexamined).toEqual([]);
+  });
+
+  test("a stale project holding an unreadable directory that nothing disqualifies is reported as unexamined", async () => {
+    const project = await createVitestTempDir(tree.tempRoot, STALE, 3, { ssr: 2 });
+    const locked = join(project, "a-secret");
     await mkdir(locked);
     await chmod(locked, 0o000);
 
@@ -162,7 +181,8 @@ describe("Vitest temp directories", () => {
 
     expect(plan.reclaiming).toEqual([]);
     expect(plan.keeping).toEqual([]);
-    expect(plan.unexamined).toEqual([]);
+    expect(only(plan.unexamined).path).toBe(project);
+    expect(only(plan.unexamined).reason).toContain("could not be read");
   });
 
   /**
