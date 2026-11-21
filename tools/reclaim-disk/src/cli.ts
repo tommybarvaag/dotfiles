@@ -389,9 +389,26 @@ const yesFlag = Flag.Boolean("yes").pipe(
   Flag.withDescription("Skip the confirmation prompt. Required when stdin is not a terminal."),
 );
 
+/**
+ * Where turbo caches are looked for when no `--source-root` is given.
+ *
+ * `~/.t3` holds T3 Code's agent worktrees, each a checkout with its own
+ * `.turbo/cache`. A root that does not exist reports nothing, so a machine
+ * without one of these loses nothing by it being listed.
+ */
+const DEFAULT_SOURCE_ROOTS: ReadonlyArray<string> = [
+  join(homedir(), "src"),
+  join(homedir(), ".t3"),
+];
+
+// Repeatable. Giving any `--source-root` replaces the defaults rather than
+// adding to them, so a run can always be narrowed to exactly one tree.
 const sourceRootFlag = Flag.String("source-root").pipe(
-  Flag.withDefault(join(homedir(), "src")),
-  Flag.withDescription("Root containing the repositories whose turbo caches are scanned."),
+  Flag.atLeast(0),
+  Flag.map((given): ReadonlyArray<string> => (given.length === 0 ? DEFAULT_SOURCE_ROOTS : given)),
+  Flag.withDescription(
+    "Root whose turbo caches are scanned. Repeatable; replaces the defaults (~/src, ~/.t3).",
+  ),
 );
 
 const worktreeRootFlag = Flag.String("worktree-root").pipe(
@@ -412,7 +429,7 @@ export const reclaimDisk = Command.make(
     yes: yesFlag,
     age: ageFlag,
     only: onlyFlag,
-    sourceRoot: sourceRootFlag,
+    sourceRoots: sourceRootFlag,
     worktreeRoot: worktreeRootFlag,
   },
   (config) =>
@@ -421,7 +438,7 @@ export const reclaimDisk = Command.make(
       const now = new Date(yield* Clock.currentTimeMillis);
 
       const options: Reclaim.SurveyOptions = {
-        sourceRoot: config.sourceRoot,
+        sourceRoots: config.sourceRoots,
         worktreeRoot: config.worktreeRoot,
         selection: toSelection(config.only),
         caches: toCacheDisposition(config.age, now),

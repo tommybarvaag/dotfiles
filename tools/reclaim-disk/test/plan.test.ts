@@ -118,6 +118,27 @@ describe("decideWorktree", () => {
 });
 
 describe("make", () => {
+  test("a cache inside a removed worktree is dropped, and one inside a kept worktree is not", () => {
+    const plan = Plan.make(
+      [
+        worktree("/w/app/gone", 900, { _tag: "Clean" }),
+        turboCache("/w/app/gone/.turbo/cache", 400),
+        worktree("/w/app/kept", 900, { _tag: "TrackedDirty", entries: [" M a.ts"] }),
+        turboCache("/w/app/kept/.turbo/cache", 300),
+        // Shares a prefix with a removed worktree without being inside it.
+        turboCache("/w/app/gone-too/.turbo/cache", 200),
+      ],
+      deleteCaches,
+    );
+
+    expect(plan.reclaiming.map((entry) => entry.target.path)).toEqual([
+      "/w/app/gone",
+      "/w/app/kept/.turbo/cache",
+      "/w/app/gone-too/.turbo/cache",
+    ]);
+    expect(plan.reclaimable).toBe(size(1400));
+  });
+
   test("turbo caches are always reclaimable", () => {
     const plan = Plan.make([turboCache("/a/.turbo/cache", 1024)], deleteCaches);
 

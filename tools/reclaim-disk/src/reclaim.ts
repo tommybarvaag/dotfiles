@@ -38,8 +38,11 @@ export type Selection = "all" | "turbo-only" | "worktrees-only";
 
 /** Where to look and what to consider. */
 export type SurveyOptions = {
-  /** Root containing the repositories whose turbo caches are scanned. */
-  readonly sourceRoot: string;
+  /**
+   * Roots whose turbo caches are scanned. They may nest or overlap; a cache
+   * reached from two of them is still one target.
+   */
+  readonly sourceRoots: ReadonlyArray<string>;
   /** Root containing agent worktrees. */
   readonly worktreeRoot: string;
   /** Which categories to include. */
@@ -259,7 +262,33 @@ function unreadable(found: SearchResult): ReadonlyArray<Plan.Scanned> {
 }
 
 /**
- * Measure every turbo cache beneath the source root.
+ * Search several roots and merge what they found into one result.
+ *
+ * Roots are allowed to nest — `~/.t3` and `~/.t3/worktrees` both reach the
+ * same caches — so a path is kept once however many roots reached it.
+ * Measuring it twice would double the reported total, and deleting it twice
+ * would report the second attempt as a failure on a cache that is gone.
+ *
+ * @param roots - The directories to search.
+ * @param search - The search to run beneath each one.
+ * @returns Every distinct match and every distinct unreadable directory.
+ */
+const searchEach = Effect.fn("Reclaim.searchEach")(function* (
+  roots: ReadonlyArray<string>,
+  search: (root: string) => Effect.Effect<SearchResult, ScanFailed>,
+) {
+  const results = yield* Effect.forEach(roots, search);
+
+  const matches = new Set(results.flatMap((result) => result.matches));
+  const skipped = new Map(
+    results.flatMap((result) => result.skipped).map((directory) => [directory.path, directory]),
+  );
+
+  return { matches: [...matches], skipped: [...skipped.values()] } satisfies SearchResult;
+});
+
+/**
+ * Measure every turbo cache beneath the source roots.
  *
  * @param options - The survey options.
  * @returns One result per cache directory.
@@ -269,7 +298,7 @@ const surveyTurboCaches = Effect.fn("Reclaim.surveyTurboCaches")(function* (
 ) {
   const inventory = yield* DiskInventory;
   const { caches } = options;
-  const found = yield* inventory.findTurboCaches(options.sourceRoot);
+  const found = yield* searchEach(options.sourceRoots, inventory.findTurboCaches);
 
   // Measured through the very disposition that will delete them, so a cache
   // cannot be reported at one size and emptied at another.

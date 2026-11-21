@@ -304,13 +304,44 @@ export function make(scanned: ReadonlyArray<Scanned>, caches: CacheDisposition):
     }
   }
 
-  reclaiming.sort((left, right) => right.target.size - left.target.size);
+  const reclaimingOnce = withoutCachesInsideRemovedWorktrees(reclaiming);
+
+  reclaimingOnce.sort((left, right) => right.target.size - left.target.size);
 
   return {
-    reclaiming,
+    reclaiming: reclaimingOnce,
     keeping,
     unexamined,
-    reclaimable: Kilobytes.sum(reclaiming.map((entry) => entry.target.size)),
-    pruning: owningRepositories(reclaiming),
+    reclaimable: Kilobytes.sum(reclaimingOnce.map((entry) => entry.target.size)),
+    pruning: owningRepositories(reclaimingOnce),
   };
+}
+
+/**
+ * Drop the turbo caches that a worktree removal in the same plan already covers.
+ *
+ * A source root can contain the worktree root — `~/.t3` holds
+ * `~/.t3/worktrees` — so one cache can be found as a cache and also sit
+ * inside a worktree being deleted. Planning both counts its size twice, and
+ * whichever deletion runs second fails on a path that is already gone. The
+ * worktree removal takes the cache with it, so the cache entry is dropped.
+ *
+ * Caches inside a worktree that is kept are left in the plan: a cache can be
+ * rebuilt even when the worktree around it holds work that must be kept.
+ *
+ * @param reclaiming - The entries whose targets are being removed.
+ * @returns The same entries, less the caches inside a removed worktree.
+ */
+function withoutCachesInsideRemovedWorktrees(
+  reclaiming: ReadonlyArray<ReclaimingEntry>,
+): Array<ReclaimingEntry> {
+  const removedWorktrees = reclaiming
+    .filter((entry) => entry.target._tag === "AgentWorktree")
+    .map((entry) => `${entry.target.path}/`);
+
+  return reclaiming.filter(
+    (entry) =>
+      entry.target._tag !== "TurboCache" ||
+      !removedWorktrees.some((worktree) => entry.target.path.startsWith(worktree)),
+  );
 }

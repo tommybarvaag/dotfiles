@@ -11,6 +11,7 @@ reclaim-disk --apply              # act on the report, after confirming
 reclaim-disk --apply --yes        # skip the confirmation (required in scripts)
 reclaim-disk --age 30 --apply     # keep the last 30 days of turbo cache
 reclaim-disk --only turbo         # caches only
+reclaim-disk --source-root ~/_src --source-root ~/fuse   # scan these instead of the defaults
 reclaim-disk --help
 ```
 
@@ -18,6 +19,13 @@ On a terminal the scan repaints a single status line as directories are found
 and measured, and `--apply` asks for confirmation before deleting. Piped or in
 CI it emits neither — output is the report alone, with no escape sequences —
 and `--apply` without `--yes` refuses rather than deleting unattended.
+
+Turbo caches are looked for under `~/src` and `~/.t3` by default; `~/.t3` is
+where T3 Code keeps its agent worktrees, each with a `.turbo/cache` of its own.
+`--source-root` is repeatable and replaces the defaults when given. Roots may
+nest, and a cache reached from more than one is planned once. A cache inside a
+worktree the same run removes is left to that removal rather than planned
+twice.
 
 ## Why it is shaped this way
 

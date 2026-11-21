@@ -92,14 +92,16 @@ function only<A>(values: ReadonlyArray<A>): A {
  *
  * @param selection - Which categories to consider.
  * @param caches - What the run does with every cache it finds.
+ * @param sourceRoots - Where caches are looked for; the tree's source root unless given.
  * @returns The survey options.
  */
 function surveying(
   selection: Reclaim.Selection,
   caches: Plan.CacheDisposition,
+  sourceRoots: ReadonlyArray<string> = [tree.sourceRoot],
 ): Reclaim.SurveyOptions {
   return {
-    sourceRoot: tree.sourceRoot,
+    sourceRoots,
     worktreeRoot: tree.worktreeRoot,
     selection,
     caches,
@@ -670,6 +672,40 @@ describe("apply", () => {
     expect(await exists(cache)).toBe(false);
     expect(await listFiles(tree.worktreeRoot)).toEqual(worktreesBefore);
     expect(await worktreeRegistrations(repository)).toHaveLength(2);
+  });
+
+  test("a cache reached from two nested source roots is planned once", async () => {
+    const repository = await createRepository(tree, "app");
+    const cache = await createTurboCache(repository, [{ name: "old", ageInDays: 90 }]);
+
+    // `~/.t3` and `~/.t3/worktrees` both reach the same caches.
+    const plan = await survey(surveying("turbo-only", deleteCaches, [tree.root, tree.sourceRoot]));
+
+    expect(only(plan.reclaiming).target.path).toBe(cache);
+
+    const outcome = await apply(plan);
+
+    expect(await exists(cache)).toBe(false);
+    expect(outcome.refused).toEqual([]);
+  });
+
+  test("a cache inside a worktree being removed is left to the worktree's removal", async () => {
+    const repository = await createRepository(tree, "app");
+    await ignorePaths(repository, [".turbo/"]);
+    const worktree = await addWorktree(tree, repository, "app", "agent-1");
+    await createTurboCache(worktree, [{ name: "old", ageInDays: 90 }]);
+
+    // A source root that holds the worktree root, as `~/.t3` holds `~/.t3/worktrees`.
+    const plan = await survey(surveying("all", deleteCaches, [tree.worktreeRoot]));
+
+    // One target, not two: planning the cache as well would count it twice,
+    // and whichever deletion ran second would fail on a path already gone.
+    expect(only(plan.reclaiming).target.path).toBe(worktree);
+
+    const outcome = await apply(plan);
+
+    expect(await exists(worktree)).toBe(false);
+    expect(outcome.refused).toEqual([]);
   });
 
   test("a pruned cache loses exactly the entries the survey measured", async () => {
