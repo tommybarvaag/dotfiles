@@ -358,9 +358,9 @@ export function make(scanned: ReadonlyArray<Scanned>, policy: Policy): Plan {
     }
   }
 
-  const reclaimingOnce = withoutCachesInsideRemovedWorktrees(reclaiming);
-
-  reclaimingOnce.sort((left, right) => right.target.size - left.target.size);
+  const reclaimingOnce = withoutCachesInsideRemovedWorktrees(reclaiming).toSorted(
+    (left, right) => right.target.size - left.target.size,
+  );
 
   return {
     reclaiming: reclaimingOnce,
@@ -388,7 +388,7 @@ export function make(scanned: ReadonlyArray<Scanned>, policy: Policy): Plan {
  */
 function withoutCachesInsideRemovedWorktrees(
   reclaiming: ReadonlyArray<ReclaimingEntry>,
-): Array<ReclaimingEntry> {
+): ReadonlyArray<ReclaimingEntry> {
   const removedWorktrees = reclaiming
     .filter((entry) => entry.target._tag === "AgentWorktree")
     .map((entry) => `${entry.target.path}/`);

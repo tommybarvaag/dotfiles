@@ -11,7 +11,7 @@ import { Clock, Console, Effect, Option, Stdio } from "effect";
 import { Command, Flag, Prompt } from "effect/unstable/cli";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { casesHandled, shouldNeverHappen } from "./defect.ts";
+import { casesHandled } from "./defect.ts";
 import * as Cutoff from "./domain/cutoff.ts";
 import * as Kilobytes from "./domain/kilobytes.ts";
 import { CommandFailed } from "./errors.ts";
@@ -121,13 +121,8 @@ function renderRow(entry: Plan.PlanEntry): string {
   );
 }
 
-/** One line of the report: a single entry, or a run of Vitest temp directories folded into one. */
-type Line =
-  | { readonly _tag: "Single"; readonly entry: Plan.PlanEntry }
-  | { readonly _tag: "Folded"; readonly entries: Worktree.NonEmptyArray<Plan.PlanEntry> };
-
 /**
- * Lay entries out as report lines, folding Vitest temp directories together.
+ * Group entries into report lines, folding Vitest temp directories together.
  *
  * A machine running agents leaks thousands of them a day, and a row each would
  * push everything else in the report off the screen. They are folded by the
@@ -137,70 +132,50 @@ type Line =
  * one per directory, so each is still checked and refused on its own.
  *
  * @param entries - The entries, in the order they are to be shown.
- * @returns One line per entry, or per fold.
+ * @returns One group per line, in the order the lines are shown.
  */
-function lines(entries: ReadonlyArray<Plan.PlanEntry>): ReadonlyArray<Line> {
-  // Each position holds an entry shown on its own, or the key of a fold.
-  const order: Array<Plan.PlanEntry | string> = [];
-  const folds = new Map<string, [Plan.PlanEntry, ...Array<Plan.PlanEntry>]>();
+function lines(
+  entries: ReadonlyArray<Plan.PlanEntry>,
+): ReadonlyArray<Worktree.NonEmptyArray<Plan.PlanEntry>> {
+  // An entry that does not fold is keyed by itself, so it is a line of its
+  // own; a Map keeps its keys in insertion order, which is the report's.
+  const groups = new Map<Plan.PlanEntry | string, [Plan.PlanEntry, ...Array<Plan.PlanEntry>]>();
 
   for (const entry of entries) {
-    if (entry.target._tag !== "VitestTempDir") {
-      order.push(entry);
-      continue;
-    }
+    const key =
+      entry.target._tag === "VitestTempDir"
+        ? [dirname(entry.target.path), label(entry.disposition), detail(entry)].join("\0")
+        : entry;
+    const group = groups.get(key);
 
-    const key = [dirname(entry.target.path), label(entry.disposition), detail(entry)].join("\0");
-    const fold = folds.get(key);
-
-    if (fold === undefined) {
-      folds.set(key, [entry]);
-      order.push(key);
+    if (group === undefined) {
+      groups.set(key, [entry]);
     } else {
-      fold.push(entry);
+      group.push(entry);
     }
   }
 
-  return order.map((item): Line => {
-    if (typeof item !== "string") {
-      return { _tag: "Single", entry: item };
-    }
-
-    return {
-      _tag: "Folded",
-      entries: folds.get(item) ?? shouldNeverHappen("every fold key was stored with its fold"),
-    };
-  });
+  return [...groups.values()];
 }
 
 /**
  * Render one report line.
  *
- * @param line - The entry, or the fold, to render.
+ * @param line - The entries the line stands for: one, or a fold of several.
  * @returns The formatted row.
  */
-function renderLine(line: Line): string {
-  switch (line._tag) {
-    case "Single":
-      return renderRow(line.entry);
+function renderLine(line: Worktree.NonEmptyArray<Plan.PlanEntry>): string {
+  const [first, ...rest] = line;
 
-    case "Folded": {
-      const [first, ...rest] = line.entries;
-
-      if (rest.length === 0) {
-        return renderRow(first);
-      }
-
-      return row(
-        Kilobytes.format(Kilobytes.sum(line.entries.map((entry) => entry.target.size))),
-        label(first.disposition),
-        `${line.entries.length} Vitest temp dirs in ${dirname(first.target.path)}${detail(first)}`,
-      );
-    }
-
-    default:
-      return casesHandled(line);
+  if (rest.length === 0) {
+    return renderRow(first);
   }
+
+  return row(
+    Kilobytes.format(Kilobytes.sum(line.map((entry) => entry.target.size))),
+    label(first.disposition),
+    `${line.length} Vitest temp dirs in ${dirname(first.target.path)}${detail(first)}`,
+  );
 }
 
 /**
@@ -455,7 +430,8 @@ const runFlag = Flag.Boolean("apply").pipe(
 const ageFlag = Flag.Int("age").pipe(
   Flag.filterMap(
     Cutoff.parseAgeInDays,
-    (days) => `--age must be a whole number of days of at least 1, but was ${days}.`,
+    (days) =>
+      `--age must be a whole number of days between 1 and ${Cutoff.MAX_AGE_IN_DAYS}, but was ${days}.`,
   ),
   Flag.optional,
   Flag.withDescription(
@@ -532,7 +508,8 @@ const tempAgeFlag = Flag.Int("temp-age").pipe(
   Flag.withDefault(DEFAULT_TEMP_AGE_HOURS),
   Flag.filterMap(
     Cutoff.parseAgeInHours,
-    (hours) => `--temp-age must be a whole number of hours of at least 1, but was ${hours}.`,
+    (hours) =>
+      `--temp-age must be a whole number of hours between 1 and ${Cutoff.MAX_AGE_IN_HOURS}, but was ${hours}.`,
   ),
   Flag.withDescription(
     "Only take Vitest temp directories nothing has written to for this many hours.",
@@ -565,12 +542,12 @@ export const reclaimDisk = Command.make(
       const options: Reclaim.SurveyOptions = {
         sourceRoots: config.sourceRoots,
         worktreeRoot: config.worktreeRoot,
-        vitestTemp: {
-          roots: config.tempRoots,
-          staleBefore: Cutoff.hoursBefore(now, config.tempAge),
-        },
+        tempRoots: config.tempRoots,
         selection: toSelection(config.only),
-        caches: toCacheDisposition(config.age, now),
+        policy: {
+          caches: toCacheDisposition(config.age, now),
+          vitestTempStaleBefore: Cutoff.hoursBefore(now, config.tempAge),
+        },
       };
 
       // Runs on interruption too, so Ctrl+C never leaves a half-drawn line.

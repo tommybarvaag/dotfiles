@@ -7,12 +7,11 @@
  * codes and stderr are translated into the tool's typed errors and never
  * escape this module.
  */
-import { Clock, Effect, Layer, Semaphore } from "effect";
-import type { Dirent } from "node:fs";
+import { Clock, Effect, Layer, Option, Semaphore } from "effect";
+import type { Dirent, Stats } from "node:fs";
 import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { casesHandled } from "../defect.ts";
 import * as Cutoff from "../domain/cutoff.ts";
 import * as Kilobytes from "../domain/kilobytes.ts";
 import * as VitestTemp from "../domain/vitest-temp.ts";
@@ -20,7 +19,6 @@ import * as Worktree from "../domain/worktree.ts";
 import {
   ArchiveFailed,
   messageOf,
-  NotAVitestTempDir,
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
@@ -269,9 +267,6 @@ const WORKTREE_DEPTH = 2;
 /** Vitest's project directories sit directly inside the temp root. */
 const VITEST_TEMP_DEPTH = 1;
 
-/** What the Vitest search is looking for, in the progress line's words. */
-const VITEST_LOOKING_FOR = "Vitest temp dirs";
-
 /**
  * The machine-wide temp directory, which agent harnesses commonly hand their
  * children as `$TMPDIR`. Its physical path, because `/tmp` is a symlink to it.
@@ -299,8 +294,15 @@ type Candidate = {
  * differs between them is data rather than two functions.
  */
 type Search = {
-  /** The directory to search. */
-  readonly root: string;
+  /**
+   * The directories to search, as the caller spelled them.
+   *
+   * Each is resolved to its physical path, and roots that resolve to the same
+   * one are walked once, so every match is named physically however its root
+   * was spelled - which is what lets two spellings of one cache, or a cache
+   * and the worktree holding it, be recognised as the same path.
+   */
+  readonly roots: ReadonlyArray<string>;
   /** What is being looked for, in human terms, for progress and failures. */
   readonly lookingFor: string;
   /** Deepest level a match may be found at, counting the root's children as 1. Never below 1. */
@@ -371,6 +373,78 @@ function classifyListingFailure(cause: unknown): ListingFailure {
   return { _tag: "Unusable", reason };
 }
 
+/** A search root, by the caller's spelling and by its physical path. */
+type Root = {
+  /** As the caller gave it, which is what a failure names. */
+  readonly spelled: string;
+  /** With every symlink taken out, which is what is walked. */
+  readonly physical: string;
+};
+
+/**
+ * Decide what a search root that could not be read means for the search.
+ *
+ * A root that does not exist holds nothing, because every root is defaulted
+ * and a machine may simply never have made one. Any other failure means the
+ * search could not be answered, and fails it.
+ *
+ * @template A - What the search produces when the root holds nothing.
+ * @param root - The root as the caller spelled it.
+ * @param lookingFor - What was being looked for beneath it.
+ * @param failure - Why the root could not be read.
+ * @param nothing - The answer for a root that does not exist.
+ * @returns That answer, or the failed scan.
+ */
+function rootFailure<A>(
+  root: string,
+  lookingFor: string,
+  failure: ListingFailure,
+  nothing: A,
+): Effect.Effect<A, ScanFailed> {
+  return failure._tag === "Absent"
+    ? Effect.succeed(nothing)
+    : Effect.fail(new ScanFailed({ root, lookingFor, cause: failure.reason }));
+}
+
+/**
+ * Resolve every root of a search to its physical path, once each.
+ *
+ * The one place a search root is canonicalised, so no finder can skip it:
+ * `/tmp` and `/private/tmp`, or a symlink and its target, are one root and are
+ * walked once. The first spelling of each is kept for failures to name.
+ *
+ * @param roots - The roots as the caller spelled them.
+ * @param lookingFor - What the search is looking for, for a failure to name.
+ * @returns Each distinct physical root that exists, with how it was spelled.
+ */
+function resolveRoots(
+  roots: ReadonlyArray<string>,
+  lookingFor: string,
+): Effect.Effect<ReadonlyArray<Root>, ScanFailed> {
+  return Effect.map(
+    Effect.forEach(roots, (spelled) =>
+      Effect.matchEffect(
+        Effect.tryPromise({ try: () => realpath(spelled), catch: classifyListingFailure }),
+        {
+          onFailure: (failure) => rootFailure(spelled, lookingFor, failure, Option.none<Root>()),
+          onSuccess: (physical) => Effect.succeed(Option.some<Root>({ spelled, physical })),
+        },
+      ),
+    ),
+    (resolved) => {
+      const distinct = new Map<string, Root>();
+
+      for (const root of resolved) {
+        if (Option.isSome(root) && !distinct.has(root.value.physical)) {
+          distinct.set(root.value.physical, root.value);
+        }
+      }
+
+      return [...distinct.values()];
+    },
+  );
+}
+
 /**
  * Whether a directory is a Turbo cache: `cache`, directly inside `.turbo`.
  *
@@ -415,11 +489,18 @@ function mergeResults(results: ReadonlyArray<SearchResult>): SearchResult {
  * either: it comes back under `skipped`, which the survey turns into a reported
  * row like any other directory it could not establish anything about.
  *
- * A root that does not exist yields nothing rather than failing. Both roots are
+ * A root that does not exist yields nothing rather than failing. Every root is
  * defaulted, so "the caller was asked to scan somewhere that does not exist" is
  * usually "this machine has never run an agent" - and that must not take the
  * other category's report down with it. A root that exists and cannot be read
- * is still a `ScanFailed`, as is any listing the machine could not answer.
+ * is still a `ScanFailed` naming the root as the caller spelled it, as is any
+ * listing the machine could not answer.
+ *
+ * Several roots are one search: they are resolved and deduplicated first, the
+ * progress line is told once, so its counts run across all of them, and one
+ * concurrency bound covers the lot. Roots may still nest - `~/.t3` holds
+ * `~/.t3/worktrees` - so a directory reached from a second root is neither
+ * reported nor returned again.
  *
  * @param progress - Where each match is reported as it is discovered.
  * @param search - What to look for, where, and how deep.
@@ -430,11 +511,21 @@ function walk(
   search: Search,
 ): Effect.Effect<SearchResult, ScanFailed> {
   return Effect.gen(function* () {
-    yield* progress.scanning(search.lookingFor, search.root);
+    const roots = yield* resolveRoots(search.roots, search.lookingFor);
+
+    yield* progress.scanning(
+      search.lookingFor,
+      roots.map((root) => root.physical),
+    );
 
     // The single bound on the whole traversal. Acquired around the listing
     // only, never held across the recursion beneath it, so it cannot deadlock.
     const listings = yield* Semaphore.make(WALK_CONCURRENCY);
+
+    // Every match and skip already reported, so a nested root cannot report
+    // one twice. Checked and recorded in one synchronous step.
+    const matched = new Set<string>();
+    const skipped = new Set<string>();
 
     const list = (directory: string): Effect.Effect<ReadonlyArray<string>, ListingFailure> =>
       Semaphore.withPermit(listings)(
@@ -444,59 +535,78 @@ function walk(
         }),
       );
 
-    const scanFailed = (cause: string): ScanFailed =>
-      new ScanFailed({ root: search.root, lookingFor: search.lookingFor, cause });
+    function walkRoot(root: Root): Effect.Effect<SearchResult, ScanFailed> {
+      const scanFailed = (cause: string): ScanFailed =>
+        new ScanFailed({ root: root.spelled, lookingFor: search.lookingFor, cause });
 
-    function descend(path: string, depth: number): Effect.Effect<SearchResult, ScanFailed> {
-      return Effect.matchEffect(list(path), {
-        onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> =>
-          failure._tag === "Unusable"
-            ? Effect.fail(scanFailed(`${path}: ${failure.reason}`))
-            : Effect.succeed({
-                matches: [],
-                skipped: [{ path, reason: `could not be listed: ${failure.reason}` }],
-              }),
-        onSuccess: (children) => visit(path, depth, children),
-      });
-    }
-
-    function visit(
-      directory: string,
-      depth: number,
-      children: ReadonlyArray<string>,
-    ): Effect.Effect<SearchResult, ScanFailed> {
-      return Effect.map(
-        Effect.forEach(
-          children,
-          (name): Effect.Effect<SearchResult, ScanFailed> => {
-            const childDepth = depth + 1;
-            const path = join(directory, name);
-
-            if (search.matches({ name, parent: directory, depth: childDepth })) {
-              return Effect.as(progress.found(path), { matches: [path], skipped: [] });
+      function descend(path: string, depth: number): Effect.Effect<SearchResult, ScanFailed> {
+        return Effect.matchEffect(list(path), {
+          onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> => {
+            if (failure._tag === "Unusable") {
+              return Effect.fail(scanFailed(`${path}: ${failure.reason}`));
             }
 
-            // Pruning is consulted only after `matches`, so a search can never
-            // be defeated by a name it is itself looking for.
-            if (childDepth >= search.maxDepth || PRUNED_DIRECTORIES.has(name)) {
+            if (skipped.has(path)) {
               return Effect.succeed(NOTHING_FOUND);
             }
 
-            return descend(path, childDepth);
+            skipped.add(path);
+
+            return Effect.succeed({
+              matches: [],
+              skipped: [{ path, reason: `could not be listed: ${failure.reason}` }],
+            });
           },
-          { concurrency: "unbounded" },
-        ),
-        mergeResults,
-      );
+          onSuccess: (children) => visit(path, depth, children),
+        });
+      }
+
+      function visit(
+        directory: string,
+        depth: number,
+        children: ReadonlyArray<string>,
+      ): Effect.Effect<SearchResult, ScanFailed> {
+        return Effect.map(
+          Effect.forEach(
+            children,
+            (name): Effect.Effect<SearchResult, ScanFailed> => {
+              const childDepth = depth + 1;
+              const path = join(directory, name);
+
+              if (search.matches({ name, parent: directory, depth: childDepth })) {
+                if (matched.has(path)) {
+                  return Effect.succeed(NOTHING_FOUND);
+                }
+
+                matched.add(path);
+
+                return Effect.as(progress.found(path), { matches: [path], skipped: [] });
+              }
+
+              // Pruning is consulted only after `matches`, so a search can never
+              // be defeated by a name it is itself looking for.
+              if (childDepth >= search.maxDepth || PRUNED_DIRECTORIES.has(name)) {
+                return Effect.succeed(NOTHING_FOUND);
+              }
+
+              return descend(path, childDepth);
+            },
+            { concurrency: "unbounded" },
+          ),
+          mergeResults,
+        );
+      }
+
+      return Effect.matchEffect(list(root.physical), {
+        onFailure: (failure) =>
+          rootFailure(root.spelled, search.lookingFor, failure, NOTHING_FOUND),
+        onSuccess: (children) => visit(root.physical, 0, children),
+      });
     }
 
-    return yield* Effect.matchEffect(list(search.root), {
-      onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> =>
-        failure._tag === "Absent"
-          ? Effect.succeed(NOTHING_FOUND)
-          : Effect.fail(scanFailed(failure.reason)),
-      onSuccess: (children) => visit(search.root, 0, children),
-    });
+    // One root after another, so a nested root meets what the root holding it
+    // already reported, rather than racing it.
+    return mergeResults(yield* Effect.forEach(roots, walkRoot));
   });
 }
 
@@ -541,48 +651,124 @@ async function listKinds(directory: string): Promise<ReadonlyArray<VitestTemp.Mo
   return entries.map((entry) => ({ name: entry.name, kind: kindOf(entry) }));
 }
 
-/** What reading a Vitest temp candidate off the disk produced, before it is recognised. */
-type CandidateRead =
-  | { readonly _tag: "Listed"; readonly listing: VitestTemp.ProjectListing }
-  | { readonly _tag: "NotADirectory" }
-  | { readonly _tag: "Absent" };
-
 /**
- * Read everything recognising a Vitest temp candidate needs, in one pass.
+ * Read one environment directory of a Vitest temp candidate.
  *
- * A path that vanishes partway through - the candidate itself or one of its
- * environment directories - is reported as absent: that is a run finishing
- * and removing its own directory, which is what this tool was going to do.
+ * `lstat` comes first and decides what the entry is, so a symlink - to a
+ * directory or anywhere else - is never listed through: it is `Other`, which
+ * disqualifies the candidate. Something replaced by a non-directory between
+ * the `lstat` and the listing is `Other` for the same reason.
  *
- * @param path - The candidate.
- * @returns The listing, or why there is none to recognise.
+ * @param environment - The environment directory's absolute path.
+ * @param name - Its name inside the candidate.
+ * @returns What it is and, when it is a directory, what it holds.
  */
-async function readCandidate(path: string): Promise<CandidateRead> {
-  try {
-    const [info, children] = await Promise.all([lstat(path), listKinds(path)]);
+async function readEnvironment(
+  environment: string,
+  name: string,
+): Promise<VitestTemp.ProjectEntry> {
+  const info = await lstat(environment);
 
-    // Seen only when something replaced the directory with a link after the
-    // walk found it, since the walk never yields one.
-    if (!info.isDirectory()) {
-      return { _tag: "NotADirectory" };
+  if (!info.isDirectory()) {
+    return { kind: "Other", name };
+  }
+
+  try {
+    return { kind: "Directory", name, modified: info.mtime, entries: await listKinds(environment) };
+  } catch (cause) {
+    if (errorCodeOf(cause) === "ENOTDIR") {
+      return { kind: "Other", name };
     }
 
+    throw cause;
+  }
+}
+
+/**
+ * Read what is at a path without following a symlink, or learn that nothing is.
+ *
+ * Only `ENOENT` means nothing is there. Anything else - a denied parent, an
+ * I/O error - is not an answer about the path, and rejects.
+ *
+ * @param path - The path to look at.
+ * @returns What is there, or `None` when nothing is.
+ */
+async function lstatIfPresent(path: string): Promise<Option.Option<Stats>> {
+  try {
+    return Option.some(await lstat(path));
+  } catch (cause) {
+    if (errorCodeOf(cause) === "ENOENT") {
+      return Option.none();
+    }
+
+    throw cause;
+  }
+}
+
+/**
+ * Read a Vitest temp candidate and recognise it.
+ *
+ * Strictly in order, because the answer decides whether `rm -rf` runs on the
+ * path: `lstat` says what is there, and only a directory is listed. Absent
+ * means one thing only - `lstat` found nothing - since that is a run finishing
+ * and removing its own directory, which is what this tool was going to do. A
+ * regular file, a symlink, or a dangling one at the path is not absent: it is
+ * something else, and is unrecognised. So is a candidate whose own listing
+ * already holds a non-directory, before any of its subdirectories is read.
+ *
+ * A subdirectory vanishing partway through counts as absent only if the
+ * candidate itself is gone too; otherwise it is a failure, and rejects.
+ *
+ * @param path - The candidate.
+ * @returns When it was last written to, why it is not Vitest's, or that it is gone.
+ */
+async function readCandidate(path: string): Promise<VitestTemp.Inspection> {
+  const name = basename(path);
+  const present = await lstatIfPresent(path);
+
+  if (Option.isNone(present)) {
+    return { _tag: "Absent" };
+  }
+
+  const info = present.value;
+
+  // Seen only when something replaced the directory after the walk found it,
+  // since the walk never yields anything but a directory.
+  if (!info.isDirectory()) {
+    return { _tag: "Unrecognised", reason: "not a directory" };
+  }
+
+  let children: ReadonlyArray<VitestTemp.ModuleEntry>;
+
+  try {
+    children = await listKinds(path);
+  } catch (cause) {
+    switch (errorCodeOf(cause)) {
+      case "ENOENT":
+        return { _tag: "Absent" };
+
+      case "ENOTDIR":
+        return { _tag: "Unrecognised", reason: "not a directory" };
+
+      default:
+        throw cause;
+    }
+  }
+
+  const screened = VitestTemp.screen(name, children);
+
+  if (Option.isSome(screened)) {
+    return screened.value;
+  }
+
+  try {
     const entries = await Promise.all(
-      children.map(async (child): Promise<VitestTemp.ProjectEntry> => {
-        if (child.kind !== "Directory") {
-          return { kind: child.kind, name: child.name };
-        }
-
-        const environment = join(path, child.name);
-        const [modified, modules] = await Promise.all([lstat(environment), listKinds(environment)]);
-
-        return { kind: "Directory", name: child.name, modified: modified.mtime, entries: modules };
-      }),
+      children.map((child) => readEnvironment(join(path, child.name), child.name)),
     );
 
-    return { _tag: "Listed", listing: { name: basename(path), modified: info.mtime, entries } };
+    return VitestTemp.recognise({ name, modified: info.mtime, entries });
   } catch (cause) {
-    if (ABSENT_CODES.has(errorCodeOf(cause))) {
+    if (errorCodeOf(cause) === "ENOENT" && Option.isNone(await lstatIfPresent(path))) {
       return { _tag: "Absent" };
     }
 
@@ -686,9 +872,9 @@ export const DiskInventoryLive = Layer.effect(
       );
 
     return DiskInventory.of({
-      findTurboCaches: (root) =>
+      findTurboCaches: (roots) =>
         walk(progress, {
-          root,
+          roots,
           lookingFor: "build caches",
           maxDepth: UNBOUNDED_DEPTH,
           matches: isTurboCache,
@@ -696,7 +882,7 @@ export const DiskInventoryLive = Layer.effect(
 
       findWorktrees: (root) =>
         walk(progress, {
-          root,
+          roots: [root],
           lookingFor: "agent worktrees",
           maxDepth: WORKTREE_DEPTH,
           matches: ({ depth }) => depth === WORKTREE_DEPTH,
@@ -724,53 +910,19 @@ export const DiskInventoryLive = Layer.effect(
         return [...new Set(physical.flat())];
       }),
 
-      findVitestTempCandidates: (root) =>
-        Effect.matchEffect(
-          Effect.tryPromise({ try: () => realpath(root), catch: classifyListingFailure }),
-          {
-            onFailure: (failure): Effect.Effect<SearchResult, ScanFailed> =>
-              failure._tag === "Absent"
-                ? Effect.succeed(NOTHING_FOUND)
-                : Effect.fail(
-                    new ScanFailed({ root, lookingFor: VITEST_LOOKING_FOR, cause: failure.reason }),
-                  ),
-            onSuccess: (resolved) =>
-              walk(progress, {
-                root: resolved,
-                lookingFor: VITEST_LOOKING_FOR,
-                maxDepth: VITEST_TEMP_DEPTH,
-                matches: ({ name }) => VitestTemp.isCandidateName(name),
-              }),
-          },
-        ),
+      findVitestTempCandidates: (roots) =>
+        walk(progress, {
+          roots,
+          lookingFor: "Vitest temp dirs",
+          maxDepth: VITEST_TEMP_DEPTH,
+          matches: ({ name }) => VitestTemp.isCandidateName(name),
+        }),
 
       inspectVitestTempDir: (path) =>
-        Effect.flatMap(
-          Effect.tryPromise({
-            try: () => readCandidate(path),
-            catch: (cause) => new TempDirUnreadable({ path, cause: messageOf(cause) }),
-          }),
-          (read): Effect.Effect<VitestTemp.Inspection, NotAVitestTempDir> => {
-            switch (read._tag) {
-              case "Absent":
-                return Effect.succeed({ _tag: "Absent" });
-
-              case "NotADirectory":
-                return Effect.fail(new NotAVitestTempDir({ path, reason: "not a directory" }));
-
-              case "Listed": {
-                const recognition = VitestTemp.recognise(read.listing);
-
-                return recognition._tag === "Recognised"
-                  ? Effect.succeed({ _tag: "Present", lastWritten: recognition.lastWritten })
-                  : Effect.fail(new NotAVitestTempDir({ path, reason: recognition.reason }));
-              }
-
-              default:
-                return casesHandled(read);
-            }
-          },
-        ),
+        Effect.tryPromise({
+          try: () => readCandidate(path),
+          catch: (cause) => new TempDirUnreadable({ path, cause: messageOf(cause) }),
+        }),
 
       sizeOf: (path) => measure(path, "du", ["-sk", path]),
 

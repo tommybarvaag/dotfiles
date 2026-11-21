@@ -20,6 +20,8 @@
  * `environment.name`, which is `ssr` for the default pool but whatever a
  * project's environment is called otherwise.
  */
+import { Option } from "effect";
+import { shouldNeverHappen } from "../defect.ts";
 
 /** Length of the nanoid Vitest names a project's temp directory with. */
 const PROJECT_NAME_LENGTH = 21;
@@ -97,13 +99,14 @@ export type Recognition =
       readonly reason: string;
     };
 
-/** What reading one candidate from the disk established. */
+/**
+ * What reading one candidate from the disk established.
+ *
+ * Not being Vitest's is an answer rather than a failure: a survey drops such a
+ * directory without a word, and only a deletion that meets one refuses it.
+ */
 export type Inspection =
-  | {
-      readonly _tag: "Present";
-      /** The latest instant anything was written into it. */
-      readonly lastWritten: Date;
-    }
+  | Recognition
   | {
       /**
        * Nothing is there. Between a survey and the deletion that is the usual
@@ -125,6 +128,44 @@ export function isCandidateName(name: string): boolean {
   return PROJECT_NAME.test(name);
 }
 
+/** A candidate that is not Vitest's, and the first reason why. */
+export type Unrecognised = Extract<Recognition, { readonly _tag: "Unrecognised" }>;
+
+/**
+ * Rule a candidate out from its own name and listing, before any of its
+ * subdirectories is read.
+ *
+ * Everything that can be known without descending is checked here, so a
+ * reader can stop at the first level: a 21-character repository checkout
+ * holding a `package.json` is dropped here, rather than having every one of
+ * its directories listed - and an unreadable one among them reported - only
+ * to be dropped afterwards.
+ *
+ * @param name - The candidate's own name.
+ * @param entries - What it holds directly, symlinks not followed.
+ * @returns Why it is not Vitest's, or `None` when its subdirectories still have to be read to tell.
+ */
+export function screen(
+  name: string,
+  entries: ReadonlyArray<ModuleEntry>,
+): Option.Option<Unrecognised> {
+  if (!isCandidateName(name)) {
+    return Option.some({
+      _tag: "Unrecognised",
+      reason: "not named like a Vitest project directory",
+    });
+  }
+
+  const stray = entries.find((entry) => entry.kind !== "Directory");
+
+  return stray === undefined
+    ? Option.none()
+    : Option.some({
+        _tag: "Unrecognised",
+        reason: `holds ${stray.name}, which is not a directory`,
+      });
+}
+
 /**
  * Decide whether a listed directory is a Vitest project temp directory.
  *
@@ -137,8 +178,10 @@ export function isCandidateName(name: string): boolean {
  * @returns When it was last written to, or why it is not one.
  */
 export function recognise(listing: ProjectListing): Recognition {
-  if (!isCandidateName(listing.name)) {
-    return { _tag: "Unrecognised", reason: "not named like a Vitest project directory" };
+  const screened = screen(listing.name, listing.entries);
+
+  if (Option.isSome(screened)) {
+    return screened.value;
   }
 
   let modules = 0;
@@ -146,7 +189,7 @@ export function recognise(listing: ProjectListing): Recognition {
 
   for (const entry of listing.entries) {
     if (entry.kind !== "Directory") {
-      return { _tag: "Unrecognised", reason: `holds ${entry.name}, which is not a directory` };
+      return shouldNeverHappen("screen rules out every entry that is not a directory");
     }
 
     for (const module of entry.entries) {

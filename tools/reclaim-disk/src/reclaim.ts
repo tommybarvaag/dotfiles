@@ -18,13 +18,11 @@
  */
 import { Effect, Option } from "effect";
 import { casesHandled } from "./defect.ts";
-import type * as Cutoff from "./domain/cutoff.ts";
 import * as Kilobytes from "./domain/kilobytes.ts";
 import * as Plan from "./domain/plan.ts";
 import * as Worktree from "./domain/worktree.ts";
 import type {
   ArchiveFailed,
-  NotAVitestTempDir,
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
@@ -33,7 +31,11 @@ import type {
   TempDirUnreadable,
   WorktreeStatusUnavailable,
 } from "./errors.ts";
-import { TempDirWrittenSinceSurvey, WorktreeChangedSinceSurvey } from "./errors.ts";
+import {
+  NotAVitestTempDir,
+  TempDirWrittenSinceSurvey,
+  WorktreeChangedSinceSurvey,
+} from "./errors.ts";
 import { DiskInventory, DiskMutator, type SearchResult } from "./ports.ts";
 
 /** Which categories of target to consider. */
@@ -54,17 +56,6 @@ export type TempRoots =
       readonly roots: Worktree.NonEmptyArray<string>;
     };
 
-/** Where Vitest temp directories are looked for, and how old one must be to go. */
-export type VitestTempOptions = {
-  /** The temp roots to search. */
-  readonly roots: TempRoots;
-  /**
-   * The instant, resolved once at the command line, before which a directory
-   * must have been last written to. One written to since is reported and kept.
-   */
-  readonly staleBefore: Cutoff.Cutoff;
-};
-
 /** Where to look and what to consider. */
 export type SurveyOptions = {
   /**
@@ -74,20 +65,18 @@ export type SurveyOptions = {
   readonly sourceRoots: ReadonlyArray<string>;
   /** Root containing agent worktrees. */
   readonly worktreeRoot: string;
-  /** Where Vitest temp directories are looked for, and how old one must be to go. */
-  readonly vitestTemp: VitestTempOptions;
+  /** Where Vitest temp directories are looked for. */
+  readonly tempRoots: TempRoots;
   /** Which categories to include. */
   readonly selection: Selection;
   /**
-   * What this run does with every turbo cache it finds: take the whole thing,
-   * or prune the entries older than a cutoff the command line has already
-   * resolved.
+   * What this run decided before it looked, resolved once at the command line.
    *
-   * The decision travels rather than the flag it came from, so measuring,
+   * The decision travels rather than the flags it came from, so measuring,
    * reporting, confirming, and deleting are all pointed at the same entries by
    * the same value.
    */
-  readonly caches: Plan.CacheDisposition;
+  readonly policy: Plan.Policy;
 };
 
 /**
@@ -130,7 +119,11 @@ export type Outcome = {
   readonly freed: Option.Option<Kilobytes.Kilobytes>;
   /** Archives written before deletion, in the order created. */
   readonly archives: ReadonlyArray<string>;
-  /** Number of targets actually removed, counted rather than assumed. */
+  /**
+   * Number of targets carried out, counted rather than assumed: removed by this
+   * run, or found already gone - its run having cleaned up first - when it
+   * came to remove them.
+   */
   readonly removed: number;
   /** Entries and repositories the run did not carry out, each with its reason. */
   readonly refused: ReadonlyArray<Refusal>;
@@ -141,11 +134,7 @@ const SCAN_CONCURRENCY = 8;
 
 /** Why one directory could not be examined, in the report's words. */
 type ExaminationFailure =
-  | SizeUnavailable
-  | WorktreeStatusUnavailable
-  | NotAWorktree
-  | NotAVitestTempDir
-  | TempDirUnreadable;
+  SizeUnavailable | WorktreeStatusUnavailable | NotAWorktree | TempDirUnreadable;
 
 /**
  * Every expected failure this service reports rather than propagates.
@@ -157,6 +146,7 @@ type ExaminationFailure =
 type Impediment =
   | ExaminationFailure
   | WorktreeChangedSinceSurvey
+  | NotAVitestTempDir
   | TempDirWrittenSinceSurvey
   | ArchiveFailed
   | RemoveFailed
@@ -290,12 +280,19 @@ function scanned(
 ): Effect.Effect<Plan.Scanned, never, DiskInventory> {
   return Effect.match(examination, {
     onSuccess: (target): Plan.Scanned => ({ _tag: "Examined", target }),
-    onFailure: (failure): Plan.Scanned => ({
-      _tag: "Unexamined",
-      path,
-      reason: consequenceOf(failure).reason,
-    }),
+    onFailure: (failure) => unexamined(path, failure),
   });
+}
+
+/**
+ * Record a directory the scan could establish nothing about, and why.
+ *
+ * @param path - The directory being examined.
+ * @param failure - What stopped the examination.
+ * @returns The unexamined result, in the report's words.
+ */
+function unexamined(path: string, failure: ExaminationFailure): Plan.Scanned {
+  return { _tag: "Unexamined", path, reason: consequenceOf(failure).reason };
 }
 
 /**
@@ -318,32 +315,6 @@ function unreadable(found: SearchResult): ReadonlyArray<Plan.Scanned> {
 }
 
 /**
- * Search several roots and merge what they found into one result.
- *
- * Roots are allowed to nest — `~/.t3` and `~/.t3/worktrees` both reach the
- * same caches — so a path is kept once however many roots reached it.
- * Measuring it twice would double the reported total, and deleting it twice
- * would report the second attempt as a failure on a cache that is gone.
- *
- * @param roots - The directories to search.
- * @param search - The search to run beneath each one.
- * @returns Every distinct match and every distinct unreadable directory.
- */
-const searchEach = Effect.fn("Reclaim.searchEach")(function* (
-  roots: ReadonlyArray<string>,
-  search: (root: string) => Effect.Effect<SearchResult, ScanFailed>,
-) {
-  const results = yield* Effect.forEach(roots, search);
-
-  const matches = new Set(results.flatMap((result) => result.matches));
-  const skipped = new Map(
-    results.flatMap((result) => result.skipped).map((directory) => [directory.path, directory]),
-  );
-
-  return { matches: [...matches], skipped: [...skipped.values()] } satisfies SearchResult;
-});
-
-/**
  * Measure every turbo cache beneath the source roots.
  *
  * @param options - The survey options.
@@ -353,8 +324,8 @@ const surveyTurboCaches = Effect.fn("Reclaim.surveyTurboCaches")(function* (
   options: SurveyOptions,
 ) {
   const inventory = yield* DiskInventory;
-  const { caches } = options;
-  const found = yield* searchEach(options.sourceRoots, inventory.findTurboCaches);
+  const { caches } = options.policy;
+  const found = yield* inventory.findTurboCaches(options.sourceRoots);
 
   // Measured through the very disposition that will delete them, so a cache
   // cannot be reported at one size and emptied at another.
@@ -439,17 +410,14 @@ function examineVitestTempDir(
 ): Effect.Effect<ReadonlyArray<Plan.Scanned>, never, DiskInventory> {
   return Effect.gen(function* () {
     const inventory = yield* DiskInventory;
-    const inspection = yield* Effect.catchTag(
-      inventory.inspectVitestTempDir(path),
-      "NotAVitestTempDir",
-      () => Effect.succeed({ _tag: "Absent" } as const),
-    );
+    const inspection = yield* inventory.inspectVitestTempDir(path);
 
     switch (inspection._tag) {
       case "Absent":
+      case "Unrecognised":
         return [];
 
-      case "Present": {
+      case "Recognised": {
         const size = yield* inventory.sizeOf(path);
 
         return [
@@ -463,13 +431,7 @@ function examineVitestTempDir(
       default:
         return casesHandled(inspection);
     }
-  }).pipe(
-    Effect.catch((failure) =>
-      Effect.succeed<ReadonlyArray<Plan.Scanned>>([
-        { _tag: "Unexamined", path, reason: consequenceOf(failure).reason },
-      ]),
-    ),
-  );
+  }).pipe(Effect.catch((failure) => Effect.succeed([unexamined(path, failure)])));
 }
 
 /**
@@ -482,9 +444,9 @@ const surveyVitestTempDirs = Effect.fn("Reclaim.surveyVitestTempDirs")(function*
   options: SurveyOptions,
 ) {
   const inventory = yield* DiskInventory;
-  const { roots } = options.vitestTemp;
+  const roots = options.tempRoots;
   const searched = roots._tag === "Given" ? roots.roots : yield* inventory.vitestTempRoots;
-  const found = yield* searchEach(searched, inventory.findVitestTempCandidates);
+  const found = yield* inventory.findVitestTempCandidates(searched);
 
   const examined = yield* Effect.forEach(found.matches, examineVitestTempDir, {
     concurrency: SCAN_CONCURRENCY,
@@ -522,15 +484,16 @@ export const survey: (
   options: SurveyOptions,
 ) {
   // Sequentially, on purpose: the scans share one repainted status line, and
-  // `ScanProgress.scanning` resets its counters, so two scans at once would
-  // reset each other's and interleave their counts into a single garbled line.
+  // each category's search opens with `ScanProgress.scanning`, which resets the
+  // counters - so two scans at once would reset each other's and interleave
+  // their counts into a single garbled line.
   const results = yield* Effect.forEach(SCANS[options.selection], (scan) => scan(options));
 
-  return Plan.make(results.flat(), {
-    caches: options.caches,
-    vitestTempStaleBefore: options.vitestTemp.staleBefore,
-  });
+  return Plan.make(results.flat(), options.policy);
 });
+
+/** What re-reading a target just before acting on it established. */
+type Standing = "Proceed" | "AlreadyGone";
 
 /**
  * Re-establish that a target is still what the survey found, immediately
@@ -543,6 +506,7 @@ export const survey: (
  * report was printed may hold two hours of work by the time `y` is pressed.
  *
  * @param target - The target about to be acted on.
+ * @returns Whether to go ahead, or that the target is already gone and there is nothing to remove.
  */
 const stillAsSurveyed = Effect.fn("Reclaim.stillAsSurveyed")(function* (
   target: Plan.ReclaimTarget,
@@ -551,14 +515,14 @@ const stillAsSurveyed = Effect.fn("Reclaim.stillAsSurveyed")(function* (
     case "TurboCache":
       // Regenerable by definition: nothing a cache gained since the survey is
       // worth keeping, and the cutoff that selects its entries is resolved.
-      return;
+      return "Proceed" satisfies Standing;
 
     case "AgentWorktree": {
       const inventory = yield* DiskInventory;
       const { state } = yield* inventory.inspectWorktree(target.path);
 
       if (Worktree.equals(target.state, state)) {
-        return;
+        return "Proceed" satisfies Standing;
       }
 
       return yield* Effect.fail(
@@ -576,16 +540,23 @@ const stillAsSurveyed = Effect.fn("Reclaim.stillAsSurveyed")(function* (
 
       switch (inspection._tag) {
         // The run finished and removed its own directory, which is what this
-        // entry was going to do: the removal that follows finds nothing and
-        // succeeds, rather than failing a run over space already freed.
+        // entry was going to do. It counts as done rather than failing a run
+        // over space already freed - and nothing is removed, because whatever
+        // appears at the path from here on is not what the survey found.
         case "Absent":
-          return;
+          return "AlreadyGone" satisfies Standing;
+
+        // It was one a moment ago, so it is refused rather than dropped.
+        case "Unrecognised":
+          return yield* Effect.fail(
+            new NotAVitestTempDir({ path: target.path, reason: inspection.reason }),
+          );
 
         // Equal, not merely still before the cutoff: anything written since
         // the survey is a run that is still going, however old it looks.
-        case "Present":
+        case "Recognised":
           if (inspection.lastWritten.getTime() === target.lastWritten.getTime()) {
-            return;
+            return "Proceed" satisfies Standing;
           }
 
           return yield* Effect.fail(
@@ -612,7 +583,9 @@ const stillAsSurveyed = Effect.fn("Reclaim.stillAsSurveyed")(function* (
  * A total switch on the disposition: the entry says what happens to it, so
  * nothing is re-derived here from the options the survey ran with. An
  * `ArchiveThenDelete` entry archives first and only deletes once the archive
- * is written, so a failed archive leaves the worktree intact.
+ * is written, so a failed archive leaves the worktree intact. A target the
+ * re-check finds already gone is counted as carried out without anything being
+ * removed, because whatever appears at its path now is not what was surveyed.
  *
  * @param entry - The entry to act on.
  * @returns The archive path when one was written.
@@ -621,7 +594,11 @@ const carryOut = Effect.fn("Reclaim.carryOut")(function* (entry: Plan.Reclaiming
   const mutator = yield* DiskMutator;
   const { target, disposition } = entry;
 
-  yield* withoutArchive(stillAsSurveyed(target));
+  const standing: Standing = yield* withoutArchive(stillAsSurveyed(target));
+
+  if (standing === "AlreadyGone") {
+    return Option.none<string>();
+  }
 
   switch (disposition._tag) {
     case "Delete": {

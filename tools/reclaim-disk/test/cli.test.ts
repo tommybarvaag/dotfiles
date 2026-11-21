@@ -171,6 +171,8 @@ describe("reclaim-disk", () => {
     ]);
 
     expect(run.exitCode).not.toBe(0);
-    expect(run.stdout + run.stderr).toContain("--temp-age must be a whole number of hours");
+    expect(run.stdout + run.stderr).toContain(
+      "--temp-age must be a whole number of hours between 1 and 87600, but was 0.",
+    );
   });
 });

@@ -14,7 +14,6 @@ import type * as VitestTemp from "./domain/vitest-temp.ts";
 import type { Inspection } from "./domain/worktree.ts";
 import type {
   ArchiveFailed,
-  NotAVitestTempDir,
   NotAWorktree,
   PruneFailed,
   RemoveFailed,
@@ -40,10 +39,13 @@ export class ScanProgress extends Context.Service<
     /**
      * A search has begun.
      *
+     * Called once per search however many roots it covers, so what follows
+     * counts across all of them.
+     *
      * @param lookingFor - What is being searched for, in human terms.
-     * @param root - Where the search starts.
+     * @param roots - Where the search starts, as physical paths.
      */
-    readonly scanning: (lookingFor: string, root: string) => Effect.Effect<void>;
+    readonly scanning: (lookingFor: string, roots: ReadonlyArray<string>) => Effect.Effect<void>;
 
     /**
      * A candidate was discovered, before it has been measured.
@@ -85,7 +87,10 @@ export type UnreadableDirectory = {
 
 /** What one search of the tree established. */
 export type SearchResult = {
-  /** Absolute paths of the directories the search was looking for. */
+  /**
+   * Physical paths of the directories the search was looking for, each once,
+   * however many of its roots reached it and however they were spelled.
+   */
   readonly matches: ReadonlyArray<string>;
   /** Directories the search could not descend into, reported rather than skipped in silence. */
   readonly skipped: ReadonlyArray<UnreadableDirectory>;
@@ -96,23 +101,33 @@ export class DiskInventory extends Context.Service<
   DiskInventory,
   {
     /**
-     * Find every `.turbo/cache` directory beneath a root.
+     * Find every `.turbo/cache` directory beneath any of several roots.
+     *
+     * One search, not one per root: roots are resolved to their physical paths
+     * and an alias of one already given is not walked again, and roots may
+     * nest - `~/.t3` holds `~/.t3/worktrees` - so a cache is returned once
+     * however many roots reach it. Measuring it twice would double the
+     * reported total, and deleting it twice would fail on a cache already gone.
      *
      * A root that does not exist holds no caches, which is a fact about the
-     * machine rather than a broken request - both roots are defaulted, so a
-     * machine where one was never created must still get the other's report.
+     * machine rather than a broken request - every root is defaulted, so a
+     * machine where one was never created must still get the others' report.
      *
-     * @param root - The directory to search.
+     * @param roots - The directories to search.
      * @returns Each cache directory, and every directory the search could not read.
      */
-    readonly findTurboCaches: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
+    readonly findTurboCaches: (
+      roots: ReadonlyArray<string>,
+    ) => Effect.Effect<SearchResult, ScanFailed>;
 
     /**
      * Find every agent worktree beneath a root.
      *
      * Worktrees are nested one level under a per-repository grouping, so this
-     * looks exactly two levels deep. A root that does not exist holds no
-     * worktrees, for the same reason it holds no caches.
+     * looks exactly two levels deep. The root is resolved to its physical
+     * path, so a worktree is named the same way as a cache inside it. A root
+     * that does not exist holds no worktrees, for the same reason it holds no
+     * caches.
      *
      * @param root - The worktree root directory.
      * @returns Each worktree, and every directory the search could not read.
@@ -133,33 +148,37 @@ export class DiskInventory extends Context.Service<
     readonly vitestTempRoots: Effect.Effect<ReadonlyArray<string>>;
 
     /**
-     * Find every directory directly inside a temp root named like a Vitest
-     * project directory.
+     * Find every directory directly inside any of several temp roots named
+     * like a Vitest project directory.
      *
      * The name is a filter, not evidence: a match is a candidate for
-     * `inspectVitestTempDir` and nothing more. The root is resolved to its
-     * physical path first, so a match is named the same however the root was
-     * spelled. A root that does not exist holds no candidates.
+     * `inspectVitestTempDir` and nothing more. The roots are resolved to their
+     * physical paths first and each is walked once, so `/tmp` and
+     * `/private/tmp` find each candidate once, named the same way. A root that
+     * does not exist holds no candidates.
      *
-     * @param root - The temp root to search.
+     * @param roots - The temp roots to search.
      * @returns Each candidate, and every directory the search could not read.
      */
-    readonly findVitestTempCandidates: (root: string) => Effect.Effect<SearchResult, ScanFailed>;
+    readonly findVitestTempCandidates: (
+      roots: ReadonlyArray<string>,
+    ) => Effect.Effect<SearchResult, ScanFailed>;
 
     /**
      * Establish that a candidate is a Vitest project temp directory, and when
      * it was last written to.
      *
-     * A directory that is no longer there is reported as such rather than as a
-     * failure: between a survey and a deletion that is what a finished run
-     * leaves, and it is the outcome the deletion wanted.
+     * A directory that is no longer there, or that is not Vitest's, is reported
+     * as such rather than as a failure: between a survey and a deletion a
+     * vanished one is what a finished run leaves, and an unrecognised one is
+     * dropped by a survey but refused by a deletion, so the caller decides.
      *
      * @param path - The candidate to examine.
-     * @returns When it was last written to, or that it is gone.
+     * @returns When it was last written to, why it is not Vitest's, or that it is gone.
      */
     readonly inspectVitestTempDir: (
       path: string,
-    ) => Effect.Effect<VitestTemp.Inspection, NotAVitestTempDir | TempDirUnreadable>;
+    ) => Effect.Effect<VitestTemp.Inspection, TempDirUnreadable>;
 
     /**
      * Measure a directory's total size.

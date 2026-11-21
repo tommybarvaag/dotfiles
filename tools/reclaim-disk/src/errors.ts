@@ -107,13 +107,13 @@ export class WorktreeChangedSinceSurvey extends Schema.TaggedError<WorktreeChang
 }
 
 /**
- * A directory in a temp root is not one Vitest left behind.
+ * A planned Vitest temp directory is no longer one Vitest left behind.
  *
  * Temp roots are shared by everything on the machine, and a nanoid-shaped name
  * is shared by more than Vitest - a whole repository checkout among them. So
- * being Vitest's is parsed from what the directory holds, and everything else
- * becomes this. A survey drops it without a word, because it was never a
- * candidate; a deletion that meets it refuses, because it was one a moment ago.
+ * being Vitest's is parsed from what the directory holds. A survey drops an
+ * unrecognised one without a word, because it was never a candidate; a
+ * deletion that meets one refuses with this, because it was one a moment ago.
  */
 export class NotAVitestTempDir extends Schema.TaggedError<NotAVitestTempDir>()(
   "NotAVitestTempDir",

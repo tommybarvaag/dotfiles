@@ -8,15 +8,28 @@
  * properties of the commands that actually run.
  */
 import { type Clock, Effect } from "effect";
-import { mkdir, mkdtemp, readdir, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 
 /** Size of every fixture blob, large enough that `du -sk` reports whole kilobytes. */
 const BLOB_KB = 256;
 
+/** Milliseconds in an hour, for backdating Vitest temp directories. */
+const HOUR = 60 * 60 * 1000;
+
 /** Milliseconds in a day, for backdating cache entries. */
-const DAY = 24 * 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 
 /**
  * Environment for the fixture's own git commands.
@@ -145,6 +158,22 @@ export function exists(path: string): Promise<boolean> {
 }
 
 /**
+ * Whether anything at all is at a path, a dangling symlink included.
+ *
+ * `exists` follows a link, so it cannot tell a dangling one from nothing - and
+ * a link that was deleted is exactly what a test of a refusal has to rule out.
+ *
+ * @param path - The path to look at.
+ * @returns `true` when there is an entry there, whatever it points at.
+ */
+export function entryExists(path: string): Promise<boolean> {
+  return lstat(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+/**
  * Create a git repository holding one committed blob.
  *
  * @param tree - The tree to create it in.
@@ -259,9 +288,6 @@ export async function createTurboCache(
 
   return cache;
 }
-
-/** Milliseconds in an hour, for backdating Vitest temp directories. */
-const HOUR = 60 * 60 * 1000;
 
 /**
  * Lay out a directory the way a killed Vitest run leaves one.

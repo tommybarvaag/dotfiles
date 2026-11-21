@@ -7,6 +7,11 @@ function age(days: number): Cutoff.AgeInDays {
   return Option.getOrThrow(Cutoff.parseAgeInDays(days));
 }
 
+/** Brand an age in hours for fixtures, failing loudly on a bad literal. */
+function hours(count: number): Cutoff.AgeInHours {
+  return Option.getOrThrow(Cutoff.parseAgeInHours(count));
+}
+
 const now = new Date("2026-03-01T12:00:00Z");
 
 describe("parseAgeInDays", () => {
@@ -16,6 +21,7 @@ describe("parseAgeInDays", () => {
   });
 
   test("rejects zero and negative ages", () => {
+    expect(Cutoff.parseAgeInDays(-1)).toEqual(Option.none());
     // A negative age would resolve to a cutoff in the future, which every
     // entry predates - so `--age -5` would delete a whole cache under a report
     // promising stale entries only.
@@ -26,6 +32,50 @@ describe("parseAgeInDays", () => {
   test("rejects fractional ages", () => {
     expect(Cutoff.parseAgeInDays(1.5)).toEqual(Option.none());
     expect(Cutoff.parseAgeInDays(Number.NaN)).toEqual(Option.none());
+  });
+});
+
+describe("the age bound", () => {
+  test("accepts every whole number of days from 1 to the bound, and nothing past it", () => {
+    expect(Cutoff.parseAgeInDays(Cutoff.MAX_AGE_IN_DAYS)).toEqual(
+      Option.some(age(Cutoff.MAX_AGE_IN_DAYS)),
+    );
+    expect(Cutoff.parseAgeInDays(Cutoff.MAX_AGE_IN_DAYS + 1)).toEqual(Option.none());
+    expect(Cutoff.parseAgeInDays(999_999_999_999)).toEqual(Option.none());
+  });
+
+  test("accepts every whole number of hours from 1 to the bound, and nothing past it", () => {
+    expect(Cutoff.parseAgeInHours(1)).toEqual(Option.some(hours(1)));
+    expect(Cutoff.parseAgeInHours(Cutoff.MAX_AGE_IN_HOURS)).toEqual(
+      Option.some(hours(Cutoff.MAX_AGE_IN_HOURS)),
+    );
+    expect(Cutoff.parseAgeInHours(0)).toEqual(Option.none());
+    expect(Cutoff.parseAgeInHours(-1)).toEqual(Option.none());
+    expect(Cutoff.parseAgeInHours(1.5)).toEqual(Option.none());
+    expect(Cutoff.parseAgeInHours(Cutoff.MAX_AGE_IN_HOURS + 1)).toEqual(Option.none());
+    expect(Cutoff.parseAgeInHours(999_999_999_999)).toEqual(Option.none());
+  });
+
+  test("the oldest cutoff either parser allows is a real instant after 1970", () => {
+    // `find -newermt` cannot parse a date before 1970 on macOS, and an age
+    // large enough to overflow `Date` resolves to an Invalid Date that
+    // `format` cannot render at all.
+    const oldest = [
+      Cutoff.before(now, age(Cutoff.MAX_AGE_IN_DAYS)),
+      Cutoff.hoursBefore(now, hours(Cutoff.MAX_AGE_IN_HOURS)),
+    ];
+
+    for (const cutoff of oldest) {
+      expect(cutoff.getTime()).toBeGreaterThan(0);
+      expect(() => Cutoff.format(cutoff)).not.toThrow();
+    }
+  });
+});
+
+describe("hoursBefore", () => {
+  test("resolves an age to an instant exactly that many hours earlier", () => {
+    expect(now.getTime() - Cutoff.hoursBefore(now, hours(1)).getTime()).toBe(60 * 60 * 1000);
+    expect(Cutoff.format(Cutoff.hoursBefore(now, hours(36)))).toBe("2026-02-28 00:00:00 +0000");
   });
 });
 
