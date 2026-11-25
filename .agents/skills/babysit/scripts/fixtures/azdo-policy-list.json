@@ -1,0 +1,270 @@
+[
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-build",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "rejected",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "buildDefinitionId": 10,
+        "displayName": null,
+        "manualQueueOnly": false,
+        "queueOnSourceUpdateOnly": true,
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Build",
+        "id": "type-guid"
+      }
+    },
+    "context": {
+      "buildAfterMerge": false,
+      "buildDefinitionId": 10,
+      "buildDefinitionName": "widgets-ci",
+      "buildId": 9001,
+      "buildIsNotCurrent": false,
+      "isExpired": false,
+      "lastMergeSourceCommitId": "1111111111111111111111111111111111111111"
+    }
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-optional",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "queued",
+    "configuration": {
+      "id": 1,
+      "isBlocking": false,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "buildDefinitionId": 11,
+        "displayName": "nightly-perf",
+        "manualQueueOnly": false,
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Build",
+        "id": "type-guid"
+      }
+    },
+    "context": {
+      "buildDefinitionId": 11,
+      "buildDefinitionName": "nightly-perf",
+      "buildId": 8000,
+      "buildIsNotCurrent": true,
+      "isExpired": true
+    }
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-reviewers",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "queued",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "minimumApproverCount": 1,
+        "creatorVoteCounts": false,
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Minimum number of reviewers",
+        "id": "type-guid"
+      }
+    },
+    "context": null
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-comments",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "rejected",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Comment requirements",
+        "id": "type-guid"
+      }
+    },
+    "context": null
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-strategy",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "rejected",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "allowSquash": true,
+        "allowRebase": true,
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Require a merge strategy",
+        "id": "type-guid"
+      }
+    },
+    "context": null
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-status",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "approved",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "statusGenre": "sonar",
+        "statusName": "quality-gate",
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Status",
+        "id": "type-guid"
+      }
+    },
+    "context": null
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-na",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "notApplicable",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Work item linking",
+        "id": "type-guid"
+      }
+    },
+    "context": null
+  },
+  {
+    "artifactId": "vstfs:///CodeReview/CodeReviewId/proj-guid/77",
+    "completedDate": null,
+    "evaluationId": "eval-running",
+    "startedDate": "2026-10-08T08:01:00Z",
+    "status": "running",
+    "configuration": {
+      "id": 1,
+      "isBlocking": true,
+      "isDeleted": false,
+      "isEnabled": true,
+      "isEnterpriseManaged": false,
+      "revision": 1,
+      "settings": {
+        "buildDefinitionId": 12,
+        "displayName": null,
+        "manualQueueOnly": false,
+        "scope": [
+          {
+            "matchKind": "Exact",
+            "refName": "refs/heads/main",
+            "repositoryId": "repo-guid"
+          }
+        ]
+      },
+      "type": {
+        "displayName": "Build",
+        "id": "type-guid"
+      }
+    },
+    "context": {
+      "buildDefinitionId": 12,
+      "buildDefinitionName": "widgets-e2e",
+      "buildId": 9002,
+      "buildIsNotCurrent": false,
+      "isExpired": false
+    }
+  }
+]
